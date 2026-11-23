@@ -219,17 +219,24 @@ fn point_at(root: &Path, version: &str) -> Result<(), String> {
     })
 }
 
+/// The SHA-256 a release's list gives for `file`. A line is `<hash>  <name>` as `sha256sum`
+/// writes it in text mode, or `<hash> *<name>` in binary mode, its default on Windows; the line
+/// ends are Windows' or another's.
+fn listed_hash(sums: &[u8], file: &str) -> Option<String> {
+    String::from_utf8_lossy(sums)
+        .lines()
+        .filter_map(|line| line.trim().split_once(char::is_whitespace))
+        .find(|(_, name)| name.trim().trim_start_matches('*') == file)
+        .map(|(hash, _)| hash.to_ascii_lowercase())
+}
+
 /// Whether `file` is the launcher the release's `sums` names: a Windows program, with the
 /// SHA-256 its line gives.
 fn verify(file: &[u8], sums: &[u8]) -> Result<(), String> {
     if !file.starts_with(b"MZ") {
         return Err(crate::i18n::tr("The downloaded file is not a program.").to_string());
     }
-    let expected = String::from_utf8_lossy(sums)
-        .lines()
-        .filter_map(|line| line.split_once("  "))
-        .find(|(_, name)| name.trim_start_matches('*') == LAUNCHER)
-        .map(|(hash, _)| hash.trim().to_ascii_lowercase());
+    let expected = listed_hash(sums, LAUNCHER);
     let hash = format!("{:x}", Sha256::digest(file));
     match expected {
         Some(expected) if expected == hash => Ok(()),

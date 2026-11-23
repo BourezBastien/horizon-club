@@ -39,6 +39,28 @@ fn hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+/// `sha256sum` writes two forms: two spaces in text mode, a star in binary mode (its default on
+/// Git for Windows, so on the workflow that builds a release). The release built that way was
+/// refused by a launcher that read the first form only.
+#[test]
+fn a_list_of_hashes_is_read_as_sha256sum_writes_it_on_any_system() {
+    let file = b"MZ the launcher".to_vec();
+    let hash = hex(&file);
+    let other = hex(b"MZ another program");
+    for sums in [
+        format!("{hash}  {LAUNCHER}\n"),
+        format!("{hash} *{LAUNCHER}\r\n"),
+        format!("{other}  HorizonClub.exe\r\n{hash}  {LAUNCHER}\r\n"),
+        format!("{other} *HorizonClub.exe\n{hash} *{LAUNCHER}\n"),
+    ] {
+        assert_eq!(verify(&file, sums.as_bytes()), Ok(()), "{sums}");
+    }
+    // Another file's hash, a list without the launcher, a file that is no program: all refused.
+    assert!(verify(&file, format!("{other} *{LAUNCHER}\n").as_bytes()).is_err());
+    assert!(verify(&file, format!("{hash}  HorizonClub.exe\n").as_bytes()).is_err());
+    assert!(verify(b"no program", format!("{hash}  {LAUNCHER}\n").as_bytes()).is_err());
+}
+
 const DESCRIPTION: &str = r#"{
   "tag_name": "v0.3.0",
   "draft": false,

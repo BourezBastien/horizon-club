@@ -68,7 +68,9 @@ jobs:
           mkdir -p out
           cp launcher/target/release/HorizonClubLauncher.exe launcher/target/release/club-admin.exe out/
           cp launcher/bootstrap/target/release/HorizonClub.exe out/
-          (cd out && sha256sum HorizonClubLauncher.exe HorizonClub.exe club-admin.exe > SHA256SUMS.txt)
+          # `--text`: `<hash>  <name>` on every system. Binary mode (Git for Windows' default)
+          # writes `<hash> *<name>`, which a launcher before 0.3.3 does not read.
+          (cd out && sha256sum --text HorizonClubLauncher.exe HorizonClub.exe club-admin.exe > SHA256SUMS.txt)
           cat out/SHA256SUMS.txt
       - name: The release
         env:
