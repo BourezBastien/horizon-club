@@ -153,10 +153,13 @@ Seul le launcher se met à jour ainsi : le cœur de jeu (`core\`) se dépose tou
 
 ### Publier une nouvelle version
 
-1. Changer `version` dans `launcher/Cargo.toml` : c'est le numéro que le launcher compare à celui de la release.
-2. Construire (`RUSTFLAGS=-C target-feature=+crt-static`, voir « Construire ») : le launcher, `club-admin` (`--bin club-admin`), et l'amorce depuis `launcher/bootstrap`.
-3. Écrire `SHA256SUMS.txt` : une ligne `<empreinte>  <nom du fichier>` par exécutable (`sha256sum HorizonClubLauncher.exe HorizonClub.exe club-admin.exe > SHA256SUMS.txt`).
-4. `gh release create v<version>` avec ces quatre fichiers. Le tag est `v` suivi du numéro de `Cargo.toml`, sans quoi les launchers ne voient pas la mise à jour ; une *prerelease* ou un brouillon n'est jamais proposé.
+1. Changer `version` dans `launcher/Cargo.toml` et committer : c'est le numéro que le launcher compare à celui de la release.
+2. Pousser le tag : `git tag -a v<version> -m "…" && git push origin v<version>`. Le tag est `v` suivi du numéro de `Cargo.toml`, sans quoi les launchers ne voient pas la mise à jour ; une *prerelease* ou un brouillon n'est jamais proposé.
+3. Le workflow `club release` (.github/workflows/club-release.yml) construit les trois programmes sur GitHub et les met, avec `SHA256SUMS.txt`, dans la release du tag ; seule la version la plus récente devient « latest ». S'il ne démarre pas tout seul (le jour de la création du dépôt, GitHub ne réagissait pas encore aux envois), le lancer à la main : `gh workflow run club-release.yml --ref v<version>`, puis suivre la page *Actions* du dépôt.
+
+Le jeu, lui, se construit avec le workflow `club core` (`gh workflow run club-core.yml --ref club`) : de 35 à 80 minutes sur un poste prêté par GitHub, en artefact à déposer dans `core\` avec `club-admin install-core`.
+
+Sans le workflow, une release se fait à la main, avec les mêmes quatre fichiers (c'est ce qu'ont fait les versions 0.3.0 et 0.3.1) : construire sous `RUSTFLAGS=-C target-feature=+crt-static` le launcher et `club-admin` (`cargo build --release --manifest-path launcher/Cargo.toml --bin HorizonClubLauncher --bin club-admin`) et l'amorce (`cd launcher/bootstrap && cargo build --release`) ; écrire `SHA256SUMS.txt`, une ligne `<empreinte>  <nom du fichier>` par exécutable (`sha256sum HorizonClubLauncher.exe HorizonClub.exe club-admin.exe > SHA256SUMS.txt`) ; puis `gh release create v<version> --verify-tag --title <version> --notes-file <notes> --latest` avec ces quatre fichiers.
 
 ## Points de vigilance
 
