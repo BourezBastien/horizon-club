@@ -7,6 +7,12 @@ description = "Horizon Club's stable entry point: starts the launcher's current 
 
 [workspace]
 
+# The file's name is what the share's root holds (the students' shortcut points at it), what
+# `club-admin publish --bootstrap` copies it as, and what Windows shows for the process.
+[[bin]]
+name = "HorizonClub"
+path = "src/main.rs"
+
 [profile.release]
 opt-level = "s"
 strip = true
