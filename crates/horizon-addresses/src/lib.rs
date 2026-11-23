@@ -99,3 +99,20 @@ pub const SDK_RELEASES: &str = "https://github.com/horizon-rust/horizon/releases
 /// The fork's newest releases, which `cargo horizon-mod` reads to find the one SDK a short sha names.
 pub const SDK_RELEASE_LIST: &str =
     "https://api.github.com/repos/horizon-rust/horizon/releases?per_page=100";
+
+// ---- The school edition (docs/school-edition) --------------------------------------------------
+
+/// The newest release of the school edition's public repository, as GitHub's API describes it
+/// (its tag and its files' addresses). The launcher's updates come from there: the club's
+/// supervisor installs one, once, on the share. `HORIZON_CLUB_RELEASES` overrides it.
+pub const CLUB_RELEASES: &str =
+    "https://api.github.com/repos/BourezBastien/horizon-club/releases/latest";
+
+/// GitHub's own servers: where the school edition's releases are read and downloaded from (the
+/// API, then a release's files, which `github.com` hands over to its storage hosts).
+pub const GITHUB_RELEASE_HOSTS: &[&str] = &[
+    "api.github.com",
+    "github.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+];

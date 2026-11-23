@@ -47,9 +47,19 @@ const INFO_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 </plist>
 "#;
 
-/// Where `ensure` fills in the localized `NSMicrophoneUsageDescription` (native mods can open the
-/// microphone for voice chat; without the key macOS would kill the game instead of asking).
+/// Where `ensure` fills in the localized `NSMicrophoneUsageDescription` (the game asks for the
+/// microphone only where a voice feature the player turns on needs it; without the key macOS
+/// would kill the game instead of asking).
 const MIC_DESCRIPTION: &str = "__MIC_DESCRIPTION__";
+
+/// `text` as a string in the bundle's Info.plist: the characters XML gives a meaning to are
+/// written as their entities.
+fn xml(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
 
 /// Brings `version`'s Horizon.app up to date and returns the game's program inside it. A program
 /// replaced in the version folder (a reinstall, a build copied over) is linked again.
@@ -62,8 +72,8 @@ pub fn ensure(version: &Path) -> io::Result<PathBuf> {
     // it starts, and the plist is not a place the game can localize.
     let plist = INFO_PLIST.replacen(
         MIC_DESCRIPTION,
-        &crate::shortcut::xml(crate::i18n::tr(
-            "Native mods can use your microphone for voice chat when you enable it.",
+        &xml(crate::i18n::tr(
+            "The game uses your microphone only for voice features you turn on.",
         )),
         1,
     );
@@ -474,7 +484,7 @@ mod tests {
     #[test]
     fn xml_escapes_the_characters_plist_strings_must_not_carry() {
         assert_eq!(
-            crate::shortcut::xml(r#"a & b < c > "d""#),
+            xml(r#"a & b < c > "d""#),
             r#"a &amp; b &lt; c &gt; &quot;d&quot;"#
         );
     }

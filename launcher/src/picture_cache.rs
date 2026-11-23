@@ -1,11 +1,10 @@
-//! The pictures Home draws from the player's disk (screenshots, their blurred copies, the
-//! background), made in the background at the size they are drawn and kept under a byte budget
-//! (`horizon_launcher::pictures`).
+//! The pictures Home draws from the player's disk (the background), made in the background at
+//! the size they are drawn and kept under a byte budget (`horizon_launcher::pictures`).
 //!
 //! GPUI's `img(path)` keeps every picture it ever drew, at full size, until the launcher quits,
-//! in RAM and in its sprite atlas: one 32768 × 16384 screenshot is 2 GiB, and Overview draws the
-//! three newest as soon as Home opens (24 GiB reported on Linux, 2026-11-05). And a picture
-//! wider than the GPU's texture limit made GPUI's atlas add a max-size texture on every frame.
+//! in RAM and in its sprite atlas: one 32768 × 16384 screenshot is 2 GiB (24 GiB reported on
+//! Linux, 2026-11-05, while Home drew the newest ones). And a picture wider than the GPU's
+//! texture limit made GPUI's atlas add a max-size texture on every frame.
 //! Pictures are therefore made at the size the screen shows them, never above that limit
 //! (`pictures::drawn_side`, `pictures::gpu_limit`).
 use super::*;
@@ -15,8 +14,6 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// A screenshot tile's widest (Overview's first), in points; made at this times the screen's scale.
-const THUMB_POINTS: f32 = 360.;
 /// What the made pictures may take together, unless more than that is on screen at once.
 const BUDGET: u64 = 384 << 20;
 /// A picture drawn this recently is on screen: it stays even over the budget.
@@ -28,8 +25,6 @@ const AT_ONCE: usize = 3;
 pub(super) enum Look {
     /// Fitted inside this many pixels square.
     Fit(u32),
-    /// Small and blurred (`glass_shot_blur`).
-    Blurred,
 }
 
 type Key = (PathBuf, Look);
@@ -57,14 +52,6 @@ impl Pictures {
         self.retired.extend(gone.into_iter().flatten());
     }
 
-    /// The picture if it is already made, without making it.
-    pub(super) fn made(&self, path: &Path, look: Look) -> Option<Arc<RenderImage>> {
-        self.made
-            .peek(&(path.to_path_buf(), look))
-            .cloned()
-            .flatten()
-    }
-
     /// Frees the pictures dropped since the last frame where GPUI keeps them too.
     pub(super) fn free_retired(&mut self, window: &mut Window) {
         for image in self.retired.drain(..) {
@@ -74,13 +61,8 @@ impl Pictures {
 }
 
 impl Launcher {
-    /// The side to make a screenshot tile at, for this screen.
-    pub(super) fn thumb_side(&self) -> u32 {
-        pictures::drawn_side(THUMB_POINTS, self.scale_factor, pictures::gpu_limit())
-    }
-
-    /// The side to make a picture filling the window at (the viewer, the background): every
-    /// pixel the screen can show, even on an 8K one, within the GPU's limit.
+    /// The side to make a picture filling the window at (the background): every pixel the screen
+    /// can show, even on an 8K one, within the GPU's limit.
     pub(super) fn window_side(&self) -> u32 {
         pictures::drawn_side(
             self.window_long_side,
@@ -132,15 +114,11 @@ impl Launcher {
 
 /// Makes the picture as GPUI draws it (BGRA, as its own loader does). Runs off the UI thread.
 fn make(path: &Path, look: Look) -> Option<Arc<RenderImage>> {
-    match look {
-        Look::Blurred => glass_shot_blur::blurred(path),
-        Look::Fit(max) => {
-            // Never above the GPU's limit, whatever the caller asked: GPUI's atlas can't hold it.
-            let mut image = pictures::load_fitted(path, max.min(pictures::gpu_limit())).ok()?;
-            for p in image.pixels_mut() {
-                p.0.swap(0, 2);
-            }
-            Some(Arc::new(RenderImage::new([image::Frame::new(image)])))
-        }
+    let Look::Fit(max) = look;
+    // Never above the GPU's limit, whatever the caller asked: GPUI's atlas can't hold it.
+    let mut image = pictures::load_fitted(path, max.min(pictures::gpu_limit())).ok()?;
+    for p in image.pixels_mut() {
+        p.0.swap(0, 2);
     }
+    Some(Arc::new(RenderImage::new([image::Frame::new(image)])))
 }

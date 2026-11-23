@@ -2,15 +2,11 @@
 //! of the window's height, over the dimmed launcher: a search line, then up to eight commands,
 //! each its name and a hint. Arrows move, Enter runs, Esc or a click outside closes.
 //!
-//! The commands are the mockup's: Play each instance, Open each page and Settings, New
-//! instance, Open the game folder, and from two letters on, Install or Remove the registry's
-//! mods that match, in the selected instance.
+//! The commands are the mockup's: Play, Open each page and Settings, Open the game folder.
 
 use super::line_edit::{self, Key, LineEdit};
 use super::*;
 use crate::glass_ui::{self as ui, white};
-use horizon_launcher::browser::Project;
-use horizon_launcher::instances::Kind as InstanceKind;
 use horizon_theme::glass::ink;
 use std::path::PathBuf;
 
@@ -22,21 +18,13 @@ pub(super) struct Palette {
     focus: FocusHandle,
     /// The highlighted command.
     index: usize,
-    /// The registry's mods for the query [`asked`](Self::asked) last.
-    pub(super) mods: Vec<Project>,
-    asked: String,
-    /// The registry search's number: an answer to an older one is dropped.
-    pub(super) search: u64,
 }
 
 #[derive(Clone)]
 enum Run {
-    Play(String),
+    Play,
     Go(Page),
-    NewInstance,
     Folder(PathBuf),
-    Install(Box<Project>),
-    Remove(String),
 }
 
 struct Command {
@@ -58,9 +46,6 @@ impl Launcher {
             query: LineEdit::new(String::new(), 80, 40),
             focus,
             index: 0,
-            mods: Vec::new(),
-            asked: String::new(),
-            search: 0,
         });
     }
 
@@ -71,22 +56,14 @@ impl Launcher {
 
     /// The commands for `q` (lower case, trimmed), filtered as the mockup does.
     fn palette_commands(&self, q: &str) -> Vec<Command> {
-        let instance = self
-            .selected_instance()
-            .map_or_else(|| "Horizon".to_owned(), |i| i.name.clone());
-        let mut all = Vec::new();
-        for i in &self.instances.list {
-            if matches!(i.kind, InstanceKind::Default | InstanceKind::Own) {
-                all.push(Command {
-                    label: trf("Play {name}", &[("name", &i.name)]),
-                    hint: tr("Instance").to_string(),
-                    run: Run::Play(i.id.clone()),
-                });
-            }
-        }
+        let mut all = vec![Command {
+            label: tr("Play").to_string(),
+            hint: tr("Home").to_string(),
+            run: Run::Play,
+        }];
         // `in_top_bar`: a page the top bar hides stays out of the palette too.
         for (page, label, _) in
-            Page::in_top_bar(self.wardrobe_shown()).chain([(Page::Settings, "Settings", "")])
+            Page::in_top_bar(self.config.hosting.enabled).chain([(Page::Settings, "Settings", "")])
         {
             all.push(Command {
                 label: trf("Open {page}", &[("page", tr(label))]),
@@ -94,37 +71,12 @@ impl Launcher {
                 run: Run::Go(page),
             });
         }
+        let home = backend::game_home();
         all.push(Command {
-            label: tr("New instance").to_string(),
-            hint: tr("Instance").to_string(),
-            run: Run::NewInstance,
+            label: tr("Open the game folder").to_string(),
+            hint: crate::glass_toast::tilde(&home),
+            run: Run::Folder(home),
         });
-        if let Some(home) = self.selected_instance().map(|i| i.home.clone()) {
-            all.push(Command {
-                label: tr("Open the game folder").to_string(),
-                hint: crate::glass_toast::tilde(&home),
-                run: Run::Folder(home),
-            });
-        }
-        if q.chars().count() >= 2 {
-            let mods = self.palette.as_ref().map_or(&[][..], |p| &p.mods[..]);
-            for p in mods.iter().filter(|p| p.title.to_lowercase().contains(q)) {
-                let has = self.mods_has(p);
-                all.push(Command {
-                    label: if has {
-                        trf("Remove {name}", &[("name", &p.title)])
-                    } else {
-                        trf("Install {name}", &[("name", &p.title)])
-                    },
-                    hint: trf("Mod · {instance}", &[("instance", &instance)]),
-                    run: if has {
-                        Run::Remove(p.id.clone())
-                    } else {
-                        Run::Install(Box::new(p.clone()))
-                    },
-                });
-            }
-        }
         all.retain(|c| {
             q.is_empty() || c.label.to_lowercase().contains(q) || c.hint.to_lowercase().contains(q)
         });
@@ -135,48 +87,18 @@ impl Launcher {
     fn palette_run(&mut self, run: Run, window: &mut Window, cx: &mut Context<Self>) {
         self.palette_close(window, cx);
         match run {
-            Run::Play(id) => {
-                let Some(instance) = self.instances.list.iter().find(|i| i.id == id).cloned()
-                else {
-                    return;
-                };
-                self.select_instance(&instance);
+            Run::Play => {
                 self.go(Page::Play);
-                // Play only when the Play button would; otherwise the page says what it needs.
-                let running = self.client.is_some() || self.starting_client.is_some();
-                let prepared = self.selected().is_some_and(|t| backend::is_prepared(t));
-                if instance.java.is_some() || starts_now(prepared, self.preparing, running) {
-                    self.play();
-                }
+                // As Home's button does: the club's file is read again, and the game starts
+                // unless Home says what keeps it from starting.
+                self.play();
             }
             Run::Go(page) => self.go(page),
-            Run::NewInstance => self.open_instance_dialog(None),
             Run::Folder(home) => {
                 let _ = std::fs::create_dir_all(&home);
                 crate::glass_toast::open(cx, &home);
             }
-            Run::Install(p) => {
-                self.mods_install(crate::mods_page::InstallRequest::Palette(p));
-            }
-            Run::Remove(id) => {
-                let _ = self.mods_remove(&id);
-            }
         }
-    }
-
-    /// From two letters on, the registry is asked once for each new query.
-    fn palette_ask(&mut self) {
-        let Some(p) = self.palette.as_mut() else {
-            return;
-        };
-        let q = p.query.text().trim().to_lowercase();
-        if q.chars().count() < 2 || q == p.asked {
-            return;
-        }
-        p.asked = q.clone();
-        p.search += 1;
-        let search = p.search;
-        self.palette_mods(&q, search);
     }
 
     pub(super) fn palette_overlay(
@@ -190,14 +112,7 @@ impl Launcher {
         let q = raw.trim().to_lowercase();
         let focused = p.focus.is_focused(window);
         let focus = p.focus.clone();
-        let input = line_edit::content(
-            &p.query,
-            &t,
-            focused,
-            false,
-            false,
-            "Play, install a mod, open a page",
-        );
+        let input = line_edit::content(&p.query, &t, focused, false, false, "Play, open a page");
         let list = self.palette_commands(&q);
         let index = self
             .palette
@@ -241,10 +156,7 @@ impl Launcher {
                             }
                         }
                         Key::Escape => this.palette_close(window, cx),
-                        Key::Edited => {
-                            p.index = 0;
-                            this.palette_ask();
-                        }
+                        Key::Edited => p.index = 0,
                         Key::Pass => return,
                         _ => {}
                     },

@@ -13,3 +13,7 @@ crates/horizon-client/assets/horizon/lang/*.json merge=horizon-lang
 
 # The carried horizon-mixins patch is hashed into its tool's release tag: the same bytes on every OS.
 tools/mixins/*.patch text eol=lf
+
+# The school edition is developed on Windows, where core.autocrlf checks text out with CRLF: a
+# shell script read that way stops bash at its first line.
+*.sh text eol=lf

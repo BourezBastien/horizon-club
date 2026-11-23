@@ -1,94 +1,67 @@
-//! The selected instance's tabs under Home's hero (docs/design-system.md, "Night"; plan R0, screen
-//! 5): Overview (what Play needs), then its worlds, servers, packs, screenshots and, once the game
-//! has said something, its console. One at a time, instead of one long page under the hero.
+//! Home's tabs under its head (docs/design-system.md, "Night"; plan R0, screen 5): the game's
+//! worlds, its servers and, once the game has said something, its console. One at a time,
+//! instead of one long page under the head. What Play needs is said above the tabs.
 use super::*;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum HomeTab {
     #[default]
-    Overview,
-    Mods,
     Worlds,
     Multiplayer,
-    /// Resource packs.
-    Packs,
-    Shaders,
-    Screenshots,
     Console,
 }
 
 impl HomeTab {
-    /// `HORIZON_LAUNCHER_PAGE=worlds` (or `instance-mods`, `multiplayer`, `packs`, `screenshots`,
-    /// `console`) opens Home on that tab, for screenshots.
+    /// `HORIZON_LAUNCHER_PAGE=worlds` (or `multiplayer`, `console`) opens Home on that tab, for
+    /// screenshots.
     pub(super) fn from_env() -> Self {
         match std::env::var("HORIZON_LAUNCHER_PAGE").as_deref() {
-            Ok("instance-mods") => HomeTab::Mods,
-            Ok(page) if page.starts_with("mod-") => HomeTab::Mods,
-            Ok("worlds") => HomeTab::Worlds,
             Ok("multiplayer") => HomeTab::Multiplayer,
-            Ok("packs") => HomeTab::Packs,
-            Ok("shader-packs") => HomeTab::Shaders,
-            Ok("screenshots") => HomeTab::Screenshots,
             Ok("console") => HomeTab::Console,
-            _ => HomeTab::Overview,
+            _ => HomeTab::Worlds,
         }
     }
 }
 
 impl Launcher {
-    /// The tabs the selected instance has now, with how many things each holds (None: not known
-    /// yet, or nothing to count). The glass look shows every tab (an empty one says so); the
-    /// blocky look shows Screenshots and Console only once there is something in them.
+    /// The game's tabs, with how many things each holds (None: not known yet, or nothing to
+    /// count). The glass look shows every tab (an empty one says so); the blocky look shows the
+    /// Console only once there is something in it.
     pub(super) fn home_tab_list(
         &mut self,
         cx: &mut Context<Self>,
     ) -> Vec<(HomeTab, Option<usize>)> {
-        let mut tabs = vec![(HomeTab::Overview, None)];
-        if self.selected_instance().is_none() {
-            return tabs;
+        let mut tabs = vec![(HomeTab::Worlds, self.worlds_count(cx))];
+        // The tab's count is the list as last written. Reading the club's file again with it may
+        // change what Home says above the tabs: the frame is drawn again then.
+        if self.refresh_servers() {
+            cx.notify();
         }
-        if self.has_mods_tab() {
-            tabs.push((HomeTab::Mods, self.instance_mods_count(cx)));
-        }
-        tabs.push((HomeTab::Worlds, self.worlds_count(cx)));
-        tabs.push((HomeTab::Multiplayer, Some(self.servers_count())));
-        let (resource, shader) = self.pack_counts();
-        tabs.push((HomeTab::Packs, Some(resource)));
-        tabs.push((HomeTab::Shaders, Some(shader)));
-        let every = self.theme.glass;
-        let shots = self.screenshots_count();
-        if every || shots > 0 {
-            tabs.push((HomeTab::Screenshots, Some(shots)));
-        }
-        if every || !self.prepare_log.is_empty() || self.client.is_some() {
+        tabs.push((HomeTab::Multiplayer, Some(self.multiplayer.list.len())));
+        if self.theme.glass || !self.console_log.is_empty() || self.client.is_some() {
             tabs.push((HomeTab::Console, None));
         }
         tabs
     }
 
-    /// The tab strip and the open tab's content; `overview` is what Play needs (Home's rows).
-    pub(super) fn home_tabs(&mut self, overview: Div, cx: &mut Context<Self>) -> Div {
+    /// The tab strip and the open tab's content.
+    pub(super) fn home_tabs(&mut self, cx: &mut Context<Self>) -> Div {
         let t = self.theme;
         let tabs = self.home_tab_list(cx);
-        // A tab that went away (no screenshots left, another instance) falls back to Overview.
+        // A tab that went away (the Console before anything is logged) falls back to Worlds.
         let open = tabs
             .iter()
             .map(|(tab, _)| *tab)
             .find(|tab| *tab == self.home_tab)
-            .unwrap_or(HomeTab::Overview);
+            .unwrap_or(HomeTab::Worlds);
         let strip = div()
             .flex()
             .flex_wrap()
             .gap(px(4.))
             .children(tabs.into_iter().map(|(tab, count)| {
                 let name = match tab {
-                    HomeTab::Overview => tr("Overview"),
-                    HomeTab::Mods => tr("Installed mods"),
                     HomeTab::Worlds => tr("Worlds"),
-                    HomeTab::Multiplayer => tr("Saved servers"),
-                    HomeTab::Packs => tr("Resource packs"),
-                    HomeTab::Shaders => tr("Shaders"),
-                    HomeTab::Screenshots => tr("Screenshots"),
+                    HomeTab::Multiplayer => tr("Multiplayer"),
                     HomeTab::Console => tr("Console"),
                 };
                 let label = match count {
@@ -103,20 +76,16 @@ impl Launcher {
                 )
             }));
         // The open tab's own buttons sit at the strip's end, as a list's header would.
-        let (actions, body) = match open {
-            HomeTab::Overview => (None, Some(overview.into_any_element())),
-            HomeTab::Mods => {
-                let (actions, body) = split(self.instance_mods_tab(cx));
-                (Some(actions), Some(body))
+        let (actions, body): (Option<Div>, Option<AnyElement>) = match open {
+            HomeTab::Worlds => (None, Some(self.worlds_section(cx).into_any_element())),
+            HomeTab::Multiplayer => {
+                let (actions, section) = self.multiplayer_section(cx);
+                (Some(actions), Some(section.into_any_element()))
             }
-            HomeTab::Worlds => (
-                None,
-                self.worlds_section(cx).map(IntoElement::into_any_element),
-            ),
-            HomeTab::Multiplayer => self.multiplayer_section(cx).map(split).unzip(),
-            HomeTab::Packs | HomeTab::Shaders => self.packs_section(cx).map(split).unzip(),
-            HomeTab::Screenshots => self.screenshots_section(cx).map(split).unzip(),
-            HomeTab::Console => self.console_section(cx).map(split).unzip(),
+            HomeTab::Console => match self.console_section(cx) {
+                Some((actions, section)) => (Some(actions), Some(section.into_any_element())),
+                None => (None, None),
+            },
         };
         div()
             .flex()
@@ -129,13 +98,8 @@ impl Launcher {
                     .justify_between()
                     .gap(px(16.))
                     .child(strip)
-                    .children(actions.flatten()),
+                    .children(actions),
             )
             .children(body)
     }
-}
-
-/// A tab's buttons and content, as the strip and the page take them.
-fn split(tab: (Div, impl IntoElement)) -> (Option<Div>, AnyElement) {
-    (Some(tab.0), tab.1.into_any_element())
 }

@@ -1,38 +1,52 @@
-//! The player's server list, `servers.dat` in an instance's game folder: the game's Multiplayer
-//! screen reads and writes the same file. Its format is vanilla's (`ServerList.load`/`save`,
-//! `ServerData.read`/`write`): uncompressed NBT, `servers` a list of compounds with `name`, `ip`,
-//! an optional `icon` (a PNG in base64), `acceptTextures`, `acceptedCodeOfConduct` and `hidden`.
-//! The launcher only adds and removes entries: every other field of every entry is written back
-//! as it was read.
+//! The game's server list, `servers.dat` in the game home: the game's Multiplayer screen reads
+//! it. The club decides what it holds (docs/school-edition/launcher-target.md, section 6): before
+//! every Play, and whenever the launcher's Multiplayer tab refreshes, the launcher rewrites the
+//! list with the servers of `club.toml`, then the hosted servers announced in the club's
+//! `online\` folder. A student adds none and removes none.
+//!
+//! Its format is vanilla's (`ServerList.load`/`save`, `ServerData.read`/`write`): uncompressed
+//! NBT, `servers` a list of compounds with `name`, `ip`, an optional `icon` (a PNG in base64),
+//! `acceptTextures`, `acceptedCodeOfConduct` and `hidden`. An entry the launcher writes takes no
+//! server resource pack: `acceptTextures` set and false, where the game would otherwise ask.
+
+use crate::{config::Config, online::Announcement};
 use base64::Engine;
 use horizon_platform::world::nbt::{self, Compound, JavaString, Limits, NamedTag, Tag};
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
 const FILE: &str = "servers.dat";
-/// Horizon's official survival server, named as the game lists it. Its address comes from
-/// `launcher/links.json` on main (`backend::Links`), so a move to a new host needs no release.
-pub const OFFICIAL_NAME: &str = "Horizon Official";
-/// The official server's address until links.json is read, and when it can't be.
-pub const OFFICIAL_ADDRESS: &str = horizon_telemetry::server_status::OFFICIAL_ADDRESS;
-/// Addresses the official server had before: lists that still hold one are moved to the current one.
-pub const OFFICIAL_PREVIOUS: &[&str] = horizon_telemetry::server_status::OFFICIAL_PREVIOUS;
-/// Beside servers.dat once the official server was offered, so a player who removes it never
-/// gets it back: the address offered, so a new one moves the list once. The game writes the same file.
-const OFFICIAL_MARKER: &str = "horizon_official_server.txt";
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Server {
     pub name: String,
+    /// Where to find it: `host` or `host:port`.
     pub ip: String,
-    /// The server's picture, as the game last saw it (PNG).
+    /// The server's picture, as the game last saw it (PNG). None on a server the launcher
+    /// lists; [`replace`] sets it on what it wrote.
     pub icon: Option<Vec<u8>>,
 }
 
-/// The entries as they are in the file, the hidden ones (servers joined with Direct
-/// Connection) too.
-pub struct List {
-    entries: Vec<Compound>,
+impl Server {
+    pub fn new(name: impl Into<String>, ip: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            ip: ip.into(),
+            icon: None,
+        }
+    }
+}
+
+/// The servers the game's list holds: those of `club.toml`, in its order, then the hosted servers
+/// `announced` in the club's `online\` folder ([`crate::online::list`]).
+pub fn club_servers(config: &Config, announced: &[Announcement]) -> Vec<Server> {
+    config
+        .servers
+        .iter()
+        .map(|server| Server::new(&server.name, &server.address))
+        .chain(announced.iter().map(|a| Server::new(&a.name, a.address())))
+        .collect()
 }
 
 fn key(k: &str) -> JavaString {
@@ -46,235 +60,117 @@ fn text(entry: &Compound, k: &str) -> String {
     }
 }
 
-/// `CompoundTag.getBooleanOr("hidden", false)`, as the game reads it: any number whose low byte
-/// isn't zero.
-fn hidden(entry: &Compound) -> bool {
-    match entry.get(&key("hidden")) {
-        Some(Tag::Byte(b)) => *b != 0,
-        Some(Tag::Short(n)) => *n as i8 != 0,
-        Some(Tag::Int(n)) => *n as i8 != 0,
-        Some(Tag::Long(n)) => *n as i8 != 0,
-        _ => false,
-    }
-}
-
-fn entry(name: &str, ip: &str) -> Compound {
-    [
-        (key("name"), Tag::String(name.into())),
-        (key("ip"), Tag::String(ip.into())),
-        (key("hidden"), Tag::Byte(0)),
-    ]
-    .into_iter()
-    .collect()
-}
-
-/// An address as the game connects to it: any case, 25565 when no port is given.
-fn same_address(a: &str, b: &str) -> bool {
-    let norm = |ip: &str| {
-        let ip = ip.trim().to_ascii_lowercase();
-        ip.strip_suffix(":25565").map(str::to_owned).unwrap_or(ip)
+/// The entries of the list in `home`, as the file holds them; empty when there is no file or it
+/// can't be read, as the game reads it.
+fn entries_in(home: &Path) -> Vec<Compound> {
+    let bytes = match fs::read(home.join(FILE)) {
+        Ok(bytes) => bytes,
+        Err(_) => return Vec::new(),
     };
-    norm(a) == norm(b)
-}
-
-impl List {
-    /// The list in `home`; empty when there is none or it can't be read, as the game does.
-    pub fn load(home: &Path) -> List {
-        Self::read(home).unwrap_or(List {
-            entries: Vec::new(),
+    let Ok((root, _)) = nbt::read_named(&bytes, Limits::default()) else {
+        return Vec::new();
+    };
+    let Some(Tag::List(list)) = root.tag.get("servers") else {
+        return Vec::new();
+    };
+    list.iter()
+        .filter_map(|t| match t {
+            Tag::Compound(c) => Some(c.clone()),
+            _ => None,
         })
-    }
-
-    /// The list in `home`, empty when there is none; none when the file is there but can't be read.
-    fn read(home: &Path) -> Option<List> {
-        let bytes = match fs::read(home.join(FILE)) {
-            Ok(bytes) => bytes,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(_) => return None,
-        };
-        let entries = match bytes.is_empty() {
-            true => Vec::new(),
-            false => match nbt::read_named(&bytes, Limits::default())
-                .ok()?
-                .0
-                .tag
-                .get("servers")
-            {
-                Some(Tag::List(list)) => list
-                    .iter()
-                    .filter_map(|t| match t {
-                        Tag::Compound(c) => Some(c.clone()),
-                        _ => None,
-                    })
-                    .collect(),
-                _ => Vec::new(),
-            },
-        };
-        Some(List { entries })
-    }
-
-    /// The servers the Multiplayer screen shows, in its order.
-    pub fn servers(&self) -> Vec<Server> {
-        self.entries
-            .iter()
-            .filter(|e| !hidden(e))
-            .map(|e| Server {
-                name: text(e, "name"),
-                ip: text(e, "ip"),
-                icon: Some(text(e, "icon"))
-                    .filter(|s| !s.is_empty())
-                    .and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok()),
-            })
-            .collect()
-    }
-
-    /// Adds a server at the end of the shown ones, as the game's Add Server does.
-    pub fn add(&mut self, name: &str, ip: &str) -> Result<(), String> {
-        let (name, ip) = (name.trim(), ip.trim());
-        if ip.is_empty() {
-            return Err("A server needs an address.".into());
-        }
-        let name = if name.is_empty() {
-            "Minecraft Server"
-        } else {
-            name
-        };
-        let at = self
-            .entries
-            .iter()
-            .rposition(|e| !hidden(e))
-            .map_or(0, |i| i + 1);
-        self.entries.insert(at, entry(name, ip));
-        Ok(())
-    }
-
-    /// Removes the `index`th shown server.
-    pub fn remove(&mut self, index: usize) -> Result<Server, String> {
-        let server = self
-            .servers()
-            .into_iter()
-            .nth(index)
-            .ok_or_else(|| format!("There is no server {}.", index + 1))?;
-        let at = (0..self.entries.len())
-            .filter(|&i| !hidden(&self.entries[i]))
-            .nth(index)
-            .unwrap();
-        self.entries.remove(at);
-        Ok(server)
-    }
-
-    /// The list as a servers.dat holding only the shown entries, each with all its fields: what
-    /// an export shares, without the addresses the player typed in Direct Connection.
-    pub fn shown_file(&self) -> Result<Vec<u8>, String> {
-        // The game also reads a float or double flag (`asByte`: the low byte of its floor).
-        let floating = |e: &Compound| match e.get(&key("hidden")) {
-            Some(Tag::Float(bits)) => f32::from_bits(*bits).floor() as i32 & 0xff != 0,
-            Some(Tag::Double(bits)) => f64::from_bits(*bits).floor() as i32 & 0xff != 0,
-            _ => false,
-        };
-        file(self.entries.iter().filter(|e| !hidden(e) && !floating(e)))
-    }
-
-    /// Writes the list as the game does: a new file first, the old one kept as `servers.dat_old`.
-    pub fn save(&self, home: &Path) -> Result<(), String> {
-        let bytes = file(self.entries.iter())?;
-        let (new, current) = (home.join("servers.dat_new"), home.join(FILE));
-        let written = fs::create_dir_all(home)
-            .and_then(|()| fs::write(&new, bytes))
-            .and_then(|()| match current.exists() {
-                true => fs::copy(&current, home.join("servers.dat_old")).map(|_| ()),
-                false => Ok(()),
-            })
-            .and_then(|()| fs::rename(&new, &current));
-        written.map_err(|e| format!("Could not save the server list: {e}"))
-    }
-
-    /// Points the entries for a previous official address at `address`, each keeping the player's
-    /// name, picture and every other field. The shown list keeps one entry for the server: an old
-    /// one goes when the list already has `address`. Whether anything changed.
-    fn move_official(&mut self, address: &str, previous: &[String]) -> bool {
-        let old = |ip: &str| {
-            !same_address(ip, address)
-                && previous
-                    .iter()
-                    .any(|p| !p.trim().is_empty() && same_address(ip, p))
-        };
-        let mut shown = self.servers().iter().any(|s| same_address(&s.ip, address));
-        let mut changed = false;
-        self.entries.retain_mut(|e| {
-            if !old(&text(e, "ip")) {
-                return true;
-            }
-            changed = true;
-            if !hidden(e) {
-                if shown {
-                    return false;
-                }
-                shown = true;
-            }
-            e.insert(key("ip"), Tag::String(address.into()));
-            true
-        });
-        changed
-    }
+        .collect()
 }
 
-/// `entries` as servers.dat's bytes: uncompressed NBT, `servers` their list.
-fn file<'a>(entries: impl Iterator<Item = &'a Compound>) -> Result<Vec<u8>, String> {
+/// The pictures the list in `home` holds, by address: what the game last saw of each server.
+fn pictures_in(home: &Path) -> HashMap<String, String> {
+    entries_in(home)
+        .into_iter()
+        .filter_map(|entry| {
+            let icon = text(&entry, "icon");
+            (!icon.is_empty()).then(|| (text(&entry, "ip"), icon))
+        })
+        .collect()
+}
+
+fn entry(server: &Server, icon: Option<&str>) -> Compound {
+    let mut fields = vec![
+        (key("name"), Tag::String(server.name.as_str().into())),
+        (key("ip"), Tag::String(server.ip.as_str().into())),
+    ];
+    if let Some(icon) = icon {
+        fields.push((key("icon"), Tag::String(icon.into())));
+    }
+    // The game reads a set `acceptTextures` as the pack's status, true or false; unset, it asks.
+    fields.push((key("acceptTextures"), Tag::Byte(0)));
+    fields.push((key("hidden"), Tag::Byte(0)));
+    fields.into_iter().collect()
+}
+
+/// Rewrites the game's server list in `home` with the club's servers and the hosted servers
+/// `announced` ([`club_servers`]): before every Play, and whenever the launcher's Multiplayer tab
+/// refreshes. The servers as written; Err: why the list could not be saved.
+pub fn write_club_list(
+    home: &Path,
+    config: &Config,
+    announced: &[Announcement],
+) -> Result<Vec<Server>, String> {
+    replace(home, &club_servers(config, announced))
+}
+
+/// Now, in seconds since the Unix epoch: what an announcement's age is read against.
+pub fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
+}
+
+/// Rewrites the game's server list in `home` with `servers`, in this order and no other (the
+/// entries joined through Direct Connection go too): the game's own backup of what was there is
+/// kept as `servers.dat_old`. A server that was already in the list keeps the picture the game
+/// last saw of it. The servers as written, with those pictures; Err: why the list could not be
+/// saved.
+pub fn replace(home: &Path, servers: &[Server]) -> Result<Vec<Server>, String> {
+    let pictures = pictures_in(home);
+    let kept: Vec<(Server, Option<String>)> = servers
+        .iter()
+        .map(|server| {
+            let icon = pictures.get(&server.ip).cloned();
+            (server.clone(), icon)
+        })
+        .collect();
     let root = NamedTag {
         name: "".into(),
         tag: Tag::compound([(
             "servers",
-            Tag::List(entries.cloned().map(Tag::Compound).collect()),
+            Tag::List(
+                kept.iter()
+                    .map(|(server, icon)| Tag::Compound(entry(server, icon.as_deref())))
+                    .collect(),
+            ),
         )]),
     };
-    nbt::write_named(&root, Limits::default()).map_err(|e| e.to_string())
-}
-
-/// Puts the official server at `address` first in the list in `home`, once: not again after the
-/// player removes it, and not when the list already has its address. When the server moved (the
-/// address differs from the one offered last), the entries for its `previous` addresses move to
-/// the new one, once, and it is not offered again to a player who removed it. A list that can't be
-/// read is left alone; an empty `address` changes nothing.
-pub fn add_official(home: &Path, address: &str, previous: &[String]) -> Result<(), String> {
-    let address = address.trim();
-    if address.is_empty() {
-        return Ok(());
-    }
-    let marker = home.join(OFFICIAL_MARKER);
-    // A marker that is there but can't be read: offered already, at an address not known.
-    let offered = match fs::read_to_string(&marker) {
-        Ok(text) => Some(text),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(_) => Some(String::new()),
-    };
-    if offered.as_deref().is_some_and(|a| same_address(a, address)) {
-        return Ok(());
-    }
-    let mut list = List::read(home).ok_or("The server list can't be read.")?;
-    let mut changed = list.move_official(address, previous);
-    if offered.is_none() && !list.servers().iter().any(|s| same_address(&s.ip, address)) {
-        list.entries.insert(0, entry(OFFICIAL_NAME, address));
-        changed = true;
-    }
-    if changed {
-        list.save(home)?;
-    }
-    fs::write(marker, format!("{address}\n")).map_err(|e| e.to_string())
-}
-
-/// The shown server a command names: its position from 1, its name (any case) or its address.
-pub fn find(list: &List, query: &str) -> Result<(usize, Server), String> {
-    let servers = list.servers();
-    let q = query.trim();
-    q.parse::<usize>()
-        .ok()
-        .filter(|n| (1..=servers.len()).contains(n))
-        .map(|n| n - 1)
-        .or_else(|| servers.iter().position(|s| s.name.eq_ignore_ascii_case(q)))
-        .or_else(|| servers.iter().position(|s| s.ip.eq_ignore_ascii_case(q)))
-        .map(|i| (i, servers[i].clone()))
-        .ok_or_else(|| format!("No server {q} in the list"))
+    let bytes = nbt::write_named(&root, Limits::default()).map_err(|e| e.to_string())?;
+    let (new, current) = (home.join("servers.dat_new"), home.join(FILE));
+    fs::create_dir_all(home)
+        .and_then(|()| fs::write(&new, bytes))
+        .and_then(|()| match current.exists() {
+            true => fs::copy(&current, home.join("servers.dat_old")).map(|_| ()),
+            false => Ok(()),
+        })
+        .and_then(|()| fs::rename(&new, &current))
+        .map_err(|e| {
+            crate::i18n::trf(
+                "The game's server list could not be saved: {error}",
+                &[("error", &e.to_string())],
+            )
+        })?;
+    Ok(kept
+        .into_iter()
+        .map(|(server, icon)| Server {
+            icon: icon.and_then(|icon| base64::engine::general_purpose::STANDARD.decode(icon).ok()),
+            ..server
+        })
+        .collect())
 }
 
 #[cfg(test)]

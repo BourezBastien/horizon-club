@@ -910,6 +910,11 @@ pub(super) fn load_resources(
 /// the next starts read them from one file (arismoko/horizon#1961).
 pub(super) fn write_prepared_files(root: PathBuf) {
     use horizon_core::prepared_files;
+    // A managed build reads its resources where its supervisor put them, often read-only
+    // (crate::managed): the supervisor's tool writes the file.
+    if horizon_client::managed::on() {
+        return;
+    }
     if prepared_files::open(&root).is_some() || !root.join("horizon-resources.json").is_file() {
         return;
     }

@@ -30,15 +30,6 @@ enum Span {
 }
 
 impl Cull {
-    /// A list whose unmeasured rows count as `height` tall (without their gap): rows of a line
-    /// or two, so that the scrollbar is about right before they are drawn.
-    pub fn estimated(height: f32) -> Cull {
-        Cull(Rc::new(RefCell::new(Drawn {
-            estimate: Some(height),
-            ..Drawn::default()
-        })))
-    }
-
     /// Invalidate measurements when filtering, ordering or collection identity changes.
     pub fn reset(&self) {
         let mut drawn = self.0.borrow_mut();
@@ -221,30 +212,6 @@ mod tests {
             rendered(&state.plan(view, px(0.), 10_000, 8., |_| false))[0],
             0
         );
-    }
-
-    #[test]
-    fn short_rows_reserve_their_estimate_until_measured_and_after_a_reset() {
-        let list = Cull::estimated(30.);
-        let height = |list: &Cull| -> f32 {
-            let spans = list
-                .0
-                .borrow_mut()
-                .plan(at(0., 500., 600.), px(0.), 1_500, 6., |_| false);
-            let rows = rendered(&spans).len() as f32;
-            let spaces: f32 = spans
-                .iter()
-                .map(|span| match span {
-                    Span::Space(height) => f32::from(*height),
-                    Span::Row(_) => 0.,
-                })
-                .sum();
-            rows * 36. + spaces
-        };
-        // 1,500 lines of notes are about 54,000 px, not the 153,000 of 96 px rows.
-        assert_eq!(height(&list), 54_000.);
-        list.reset();
-        assert_eq!(height(&list), 54_000.);
     }
 
     #[test]

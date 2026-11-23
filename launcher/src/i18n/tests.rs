@@ -25,12 +25,40 @@ fn strings_in(
     let mut tokens = tokens.into_iter().peekable();
     while let Some(token) = tokens.next() {
         match token {
-            TokenTree::Ident(name) if name == "tr" || name == "trf" => {
+            // `tr` and `trf` take their key first. A row's title (`setting_row`…) and a
+            // field's placeholder reach `tr` from inside the widget: the first string
+            // literal of the call is the key there (a field's name comes before it).
+            TokenTree::Ident(name)
+                if [
+                    "tr",
+                    "trf",
+                    "setting_row",
+                    "toggle_row",
+                    "list_row",
+                    "field",
+                ]
+                .iter()
+                .any(|f| name == *f) =>
+            {
                 if let Some(TokenTree::Group(args)) = tokens.peek() {
                     if args.delimiter() == Delimiter::Parenthesis {
-                        if let Some(TokenTree::Literal(value)) = args.stream().into_iter().next() {
-                            if let Ok(value) = syn::parse_str::<syn::LitStr>(&value.to_string()) {
-                                asked.insert(value.value());
+                        let stream = args.stream();
+                        // The launcher's text fields are named by the `Field` enum; another
+                        // `field(…)` reads data, and its string is not shown.
+                        let text_field = name != "field"
+                            || matches!(
+                                stream.clone().into_iter().next(),
+                                Some(TokenTree::Ident(first)) if first == "Field"
+                            );
+                        if text_field {
+                            let first = stream
+                                .into_iter()
+                                .find(|t| matches!(t, TokenTree::Literal(_)));
+                            if let Some(TokenTree::Literal(value)) = first {
+                                if let Ok(value) = syn::parse_str::<syn::LitStr>(&value.to_string())
+                                {
+                                    asked.insert(value.value());
+                                }
                             }
                         }
                     }
@@ -53,10 +81,6 @@ fn strings() -> (BTreeSet<String>, BTreeSet<String>) {
     let mut files = Vec::new();
     sources(
         &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
-        &mut files,
-    );
-    sources(
-        &Path::new(env!("CARGO_MANIFEST_DIR")).join("../crates/horizon-mod-package/src"),
         &mut files,
     );
     let (mut asked, mut all) = (BTreeSet::new(), BTreeSet::new());
@@ -89,6 +113,11 @@ fn the_scan_finds_multiline_calls_without_reading_comments_or_quoted_code() {
         trf_other("not a translation either");
         let indirect = "widget label";
         tr(indirect);
+        self.setting_row("Row title", about, control);
+        self.toggle_row("Switch title", about, toggle);
+        self.field(Field::Name, "Placeholder text", 400., cx);
+        data.field("GameType");
+        crate::glass_ui::field(focused, invalid);
     "###;
     let (mut asked, mut all) = (BTreeSet::new(), BTreeSet::new());
     strings_in(code.parse().unwrap(), &mut asked, &mut all);
@@ -100,12 +129,16 @@ fn the_scan_finds_multiline_calls_without_reading_comments_or_quoted_code() {
             "raw \"quotes\"",
             "escaped \"quotes\" and 中\nnext",
             "continued line",
+            "Row title",
+            "Switch title",
+            "Placeholder text",
         ]
         .into_iter()
         .map(str::to_string)
         .collect()
     );
     assert!(all.contains("widget label"));
+    assert!(!asked.contains("GameType"));
     assert!(asked.is_subset(&all));
     assert!(!all.contains("line comment"));
     assert!(!all.contains("block comment"));
@@ -175,80 +208,28 @@ fn translations_are_valid_and_coverage_is_reported() {
     }
 }
 
+/// A language is saved in `settings.json` under its code, and read back from it: a student's
+/// pick outlives the launcher's version that wrote it.
 #[test]
-fn the_system_language_is_the_first_one_the_launcher_has() {
-    assert_eq!(Language::pick(["pl-PL", "en-US"]), Language::Polish);
-    assert_eq!(Language::pick(["ja-JP", "en-US"]), Language::Japanese);
-    assert_eq!(Language::parse("ja_JP.UTF-8"), Some(Language::Japanese));
-    assert_eq!(Language::pick(["tr-TR", "en-US"]), Language::Turkish);
-    assert_eq!(Language::parse("tr_TR.UTF-8"), Some(Language::Turkish));
-    assert_eq!(Language::parse("pl_PL.UTF-8"), Some(Language::Polish));
-    assert_eq!(Language::pick(["fr-CH", "en-US"]), Language::French);
-    assert_eq!(Language::pick(["it-IT", "ja"]), Language::Italian);
-    assert_eq!(Language::pick(["tlh", "ru_RU.UTF-8"]), Language::Russian);
-    assert_eq!(Language::pick(["tlh", "zh-Hans-CN"]), Language::Chinese);
-    assert_eq!(Language::pick(["tlh", "ja"]), Language::Japanese);
-    assert_eq!(Language::pick(["de-CH", "ru_RU.UTF-8"]), Language::German);
-    assert_eq!(Language::pick(["de-DE", "ja"]), Language::German);
-    assert_eq!(Language::pick(["de-DE", "zh-Hans-CN"]), Language::German);
-    assert_eq!(Language::pick(["es-ES", "en-US"]), Language::Spanish);
+fn a_language_is_saved_under_its_code() {
+    assert_eq!(serde_json::to_string(&Language::French).unwrap(), "\"fr\"");
+    assert_eq!(serde_json::to_string(&Language::English).unwrap(), "\"en\"");
     assert_eq!(
-        Language::pick(["pt-BR", "en-US"]),
-        Language::PortugueseBrazil
+        serde_json::from_str::<Language>("\"fr\"").unwrap(),
+        Language::French
     );
-    assert_eq!(Language::pick(["ko", "it-IT"]), Language::Korean);
-    assert_eq!(Language::pick(["uk-UA", "ru-RU"]), Language::Ukrainian);
-    assert_eq!(Language::parse("uk_UA.UTF-8"), Some(Language::Ukrainian));
     assert_eq!(
-        Language::parse("pt_BR.UTF-8"),
-        Some(Language::PortugueseBrazil)
+        serde_json::from_str::<Language>("\"en\"").unwrap(),
+        Language::English
     );
-    assert_eq!(Language::parse("pt-BR"), Some(Language::PortugueseBrazil));
-    assert_eq!(Language::parse("pt-PT"), Some(Language::Portuguese)); // European Portuguese now has its own table
-    assert_eq!(Language::parse("it_IT.UTF-8"), Some(Language::Italian));
-    assert_eq!(Language::pick(["nb-NO", "en-US"]), Language::Norwegian);
-    assert_eq!(Language::parse("nn_NO.UTF-8"), Some(Language::Norwegian));
-    assert_eq!(Language::pick([]), Language::English);
-    assert_eq!(Language::parse("FR"), Some(Language::French));
-    assert_eq!(Language::parse("french"), None);
-    assert_eq!(Language::parse("DE"), Some(Language::German));
-    assert_eq!(Language::parse("ES"), Some(Language::Spanish));
-    assert_eq!(Language::parse("german"), None);
-    assert_eq!(Language::parse("ZH"), Some(Language::Chinese));
-    assert_eq!(serde_json::to_string(&Language::German).unwrap(), "\"de\"");
-    assert_eq!(serde_json::to_string(&Language::Chinese).unwrap(), "\"zh\"");
-    assert_eq!(serde_json::to_string(&Language::Russian).unwrap(), "\"ru\"");
-    assert_eq!(serde_json::to_string(&Language::Spanish).unwrap(), "\"es\"");
-    assert_eq!(
-        serde_json::to_string(&Language::PortugueseBrazil).unwrap(),
-        "\"pt-br\""
-    );
+    // A code no launcher has is not a language.
+    assert!(serde_json::from_str::<Language>("\"french\"").is_err());
+    assert!(serde_json::from_str::<Language>("\"de\"").is_err());
 }
 
 #[test]
 fn a_missing_string_shows_in_english() {
-    assert_eq!(tr_in(Language::Polish, "Settings"), "Ustawienia");
-    assert_eq!(tr_in(Language::Japanese, "Settings"), "設定");
-    assert_eq!(tr_in(Language::Turkish, "Settings"), "Ayarlar");
     assert_eq!(tr_in(Language::French, "Settings"), "Paramètres");
-    assert_eq!(tr_in(Language::Russian, "Settings"), "Настройки");
-    assert_eq!(tr_in(Language::German, "Settings"), "Einstellungen");
-    assert_eq!(tr_in(Language::Chinese, "Settings"), "设置");
-    assert_eq!(tr_in(Language::Spanish, "Settings"), "Ajustes");
-    assert_eq!(tr_in(Language::Ukrainian, "Settings"), "Налаштування");
     assert_eq!(tr_in(Language::English, "Settings"), "Settings");
     assert_eq!(tr_in(Language::French, "No such string"), "No such string");
-    assert_eq!(
-        tr_in(Language::PortugueseBrazil, "Settings"),
-        "Configurações"
-    );
-}
-
-#[test]
-fn polish_entries_are_valid_and_keep_placeholders() {
-    let table: HashMap<String, String> = serde_json::from_str(Language::Polish.source()).unwrap();
-    for (en, said) in &table {
-        assert!(!said.trim().is_empty(), "empty Polish string: {en:?}");
-        assert_eq!(holes(en), holes(said), "Polish: {en:?}");
-    }
 }

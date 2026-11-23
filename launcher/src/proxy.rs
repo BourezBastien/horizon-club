@@ -1,25 +1,21 @@
-//! The proxy every download and request goes through, when the player needs one: a school's or an
-//! office's, or a country where a host is unreachable. The Settings page's Proxy row (kept as
-//! `proxy` in `settings.json`) wins; without it the usual `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`
-//! and `NO_PROXY` variables apply, so a launcher started from a shell that has them needs nothing.
+//! The proxy every download and request goes through, when one is needed: a school's or an
+//! office's, or a country where a host is unreachable. Without a setting given to `announce` the
+//! usual `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY` and `NO_PROXY` variables apply, so a tool started
+//! from a shell that has them needs nothing. The launcher's window sets none: a student downloads
+//! nothing.
 //!
-//! What goes through it: Horizon's releases and the launcher's own update, Minecraft's files and
-//! Java from Mojang, Modrinth, CurseForge, Horizon's mod registry, pictures, Microsoft sign-in,
-//! Tailscale's API, the jars a modpack import downloads, and the crates and horizon-mixins a
-//! native build's Cargo downloads ([`for_programs`]). A local address never does, and the
-//! Servers page's calls to a game server's API (`servers.rs`) build their agent without it: they
-//! are on loopback and asked every second.
+//! What goes through it: Minecraft's files and Java from Mojang, pictures. A local address never
+//! does, and the Servers page's calls to a game server's API (`servers.rs`) build their agent
+//! without it: they are on loopback and asked every second.
 //!
 //! Which hosts are reached directly, and how an address is read, are `horizon-port-pack`'s rules
-//! (`crates/horizon-port-pack/src/net.rs`): the jars an import fetches are downloaded there, and
-//! the same hosts have to be left alone on both sides. This module adds what is the launcher's
-//! own — the setting in `settings.json`, kept in memory so a request doesn't read the file — and
-//! hands the address to the parts that build their agents.
-use crate::backend::Settings;
+//! (`crates/horizon-port-pack/src/net.rs`): the same hosts have to be left alone on both sides.
+//! This module adds what is the launcher's own — the setting kept in memory so a request doesn't
+//! read it again — and hands the address to the parts that build their agents.
 use std::sync::Mutex;
 
-/// The launcher's setting, as `announce` last read it, or None before it has: a request shouldn't
-/// read `settings.json` every time, and an import fetches hundreds of jars.
+/// The setting, as `announce` last gave it, or None before it has: a request shouldn't ask again
+/// for every file.
 static SET: Mutex<Option<Option<String>>> = Mutex::new(None);
 
 /// The proxy address to reach `url` through: the launcher's setting, else the environment's, unless
@@ -46,13 +42,6 @@ pub fn agent(builder: ureq::AgentBuilder, url: &str) -> ureq::AgentBuilder {
     }
 }
 
-/// The launcher's setting for the programs it starts that download by themselves, in curl's
-/// spelling, which they read: a native build's Cargo (`CARGO_HTTP_PROXY`), fetching crates and
-/// horizon-mixins. None without one: they read the environment's then, as the launcher does.
-pub fn for_programs() -> Option<String> {
-    setting().map(crate::downloads::proxy_address)
-}
-
 /// Why `spec` can't be used as a proxy, or None when it can (empty means none).
 pub fn refuse(spec: &str) -> Option<String> {
     let spec = spec.trim();
@@ -73,10 +62,9 @@ pub fn refuse(spec: &str) -> Option<String> {
 }
 
 /// Tells the parts that build their own agents (`horizon-port-pack`) which proxy to use, and keeps
-/// the setting for the launcher's own requests. Called with what `settings.json` holds: at start,
-/// and whenever the player changes the setting.
+/// the setting for the launcher's own requests: once, before the first of them.
 ///
-/// The environment's is left to them: they read it per address (`HTTPS_PROXY` for an https jar,
+/// The environment's is left to them: they read it per address (`HTTPS_PROXY` for an https URL,
 /// `HTTP_PROXY` for an http one), the way the launcher does for its own.
 pub fn announce(setting: Option<String>) {
     let spec = setting
@@ -86,26 +74,9 @@ pub fn announce(setting: Option<String>) {
     horizon_port_pack::net::set_proxy(spec);
 }
 
-/// The launcher's setting: read from `settings.json` the first time it is needed and kept after
-/// that, so a download doesn't read the file once per file.
+/// The setting `announce` gave, or None before one (and so without): the environment's then.
 fn setting() -> Option<String> {
-    let mut set = held();
-    match set.clone() {
-        Some(kept) => kept,
-        None => {
-            let read = written();
-            *set = Some(read.clone());
-            read
-        }
-    }
-}
-
-/// The launcher's setting as it is written down, or None when there is none.
-fn written() -> Option<String> {
-    Settings::load()
-        .proxy
-        .map(|p| p.trim().to_owned())
-        .filter(|p| !p.is_empty())
+    held().clone().flatten()
 }
 
 /// The setting's lock, even after a thread panicked while holding it: an address lost to a panic
@@ -143,7 +114,7 @@ mod tests {
         assert!(refuse("socks5://").is_some());
     }
 
-    /// The reason is shown under the field and printed by `horizon-launcher settings set`.
+    /// A refused address is said without what would let someone use it.
     #[test]
     fn a_refused_address_keeps_its_credentials_to_itself() {
         let why = refuse("socks3://user:secret@127.0.0.1:7891").unwrap();

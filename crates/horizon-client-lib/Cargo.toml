@@ -143,6 +143,9 @@ tracker-send-bench = []
 audio = ["horizon-client-render/audio"]
 # Controllers: gilrs, and the DualSense's own output. Without it only `horizon-ctl pad`'s virtual pad.
 controllers = ["dep:gilrs", "horizon-client-input/controllers"]
+# A managed build (a school, a club): the launcher's rule decides where the game may connect
+# (managed.rs, docs/school-edition). Without the feature the rule is not read.
+managed = []
 # Records the call sites of mob random draws (`mob_ai_probe` traces).
 rng-trace = ["horizon-core/rng-trace"]
 # Compatibility with earlier experiment commands: main already uses mimalloc.

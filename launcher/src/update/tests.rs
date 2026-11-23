@@ -1,0 +1,186 @@
+use super::*;
+use std::io::{BufRead, BufReader, Write};
+
+/// A server on the loopback answering each of `routes` (a path and its body) in turn, in plain
+/// HTTP, one connection at a time. Its address, and the thread that serves.
+fn serve(routes: Vec<(&'static str, Vec<u8>)>) -> (String, std::thread::JoinHandle<()>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        for (path, body) in routes {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut request = String::new();
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                    break;
+                }
+                request.push_str(&line);
+            }
+            assert_eq!(
+                request.split_whitespace().nth(1),
+                Some(path),
+                "asked: {request}"
+            );
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(&body).unwrap();
+        }
+    });
+    (base, server)
+}
+
+fn hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+const DESCRIPTION: &str = r#"{
+  "tag_name": "v0.3.0",
+  "draft": false,
+  "prerelease": false,
+  "assets": [
+    { "name": "HorizonClub.exe", "browser_download_url": "https://github.com/x/y/releases/download/v0.3.0/HorizonClub.exe" },
+    { "name": "HorizonClubLauncher.exe", "browser_download_url": "https://github.com/x/y/releases/download/v0.3.0/HorizonClubLauncher.exe" },
+    { "name": "SHA256SUMS.txt", "browser_download_url": "https://github.com/x/y/releases/download/v0.3.0/SHA256SUMS.txt" }
+  ]
+}"#;
+
+#[test]
+fn a_version_is_newer_by_its_numbers_and_nothing_else_is() {
+    assert!(is_newer("0.3.0", "0.2.0"));
+    assert!(is_newer("0.10.0", "0.9.0"));
+    assert!(is_newer("1.0", "0.99.99"));
+    assert!(!is_newer("0.3.0", "0.3.0"));
+    assert!(!is_newer("0.2.0", "0.3.0"));
+    assert!(!is_newer("nightly", "0.3.0"));
+    assert!(!is_newer("0.4.0", ""));
+}
+
+#[test]
+fn a_release_is_read_from_githubs_description() {
+    let release = release_of(DESCRIPTION).unwrap();
+    assert_eq!(release.version, "0.3.0");
+    assert!(release.launcher.ends_with("/HorizonClubLauncher.exe"));
+    assert!(release.sums.ends_with("/SHA256SUMS.txt"));
+    // A release without the launcher's list of hashes is no update.
+    let without: serde_json::Value = serde_json::from_str(DESCRIPTION).unwrap();
+    let mut without = without;
+    without["assets"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|a| a["name"] != "SHA256SUMS.txt");
+    assert!(release_of(&without.to_string()).is_err());
+    assert!(release_of("not json").is_err());
+    assert!(release_of(r#"{"tag_name": "v1.0.0"}"#).is_err());
+}
+
+#[test]
+fn an_update_lands_beside_the_old_one_and_points_the_share_at_it() {
+    let root = tempfile::tempdir().unwrap();
+    let app = root.path().join("app");
+    std::fs::create_dir_all(app.join("0.2.0")).unwrap();
+    std::fs::write(app.join("0.2.0").join(LAUNCHER), b"MZ the launcher before").unwrap();
+    std::fs::write(app.join("current.txt"), "0.2.0\n").unwrap();
+    let file = b"MZ the new launcher".to_vec();
+    let sums = format!("{}  {}\n", hex(&file), LAUNCHER);
+    let (base, server) = serve(vec![
+        ("/launcher.exe", file.clone()),
+        ("/SHA256SUMS.txt", sums.into_bytes()),
+    ]);
+    let release = Release {
+        version: "0.3.0".into(),
+        launcher: format!("{base}/launcher.exe"),
+        sums: format!("{base}/SHA256SUMS.txt"),
+    };
+    install(root.path(), &release).unwrap();
+    server.join().unwrap();
+    assert_eq!(
+        std::fs::read(app.join("0.3.0").join(LAUNCHER)).unwrap(),
+        file
+    );
+    assert_eq!(
+        std::fs::read_to_string(app.join("current.txt")).unwrap(),
+        "0.3.0\n"
+    );
+    // The version before stays: `current.txt` is how one goes back.
+    assert_eq!(
+        std::fs::read(app.join("0.2.0").join(LAUNCHER)).unwrap(),
+        b"MZ the launcher before"
+    );
+    assert!(std::fs::read_dir(&app).unwrap().all(|e| {
+        let name = e.unwrap().file_name().to_string_lossy().into_owned();
+        name != "current.0.3.0.txt" && name != "HorizonClubLauncher.exe.part"
+    }));
+}
+
+#[test]
+fn a_file_that_is_not_the_releases_is_not_installed() {
+    let root = tempfile::tempdir().unwrap();
+    let app = root.path().join("app");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::write(app.join("current.txt"), "0.2.0\n").unwrap();
+    // The list names another file's hash.
+    let (base, server) = serve(vec![
+        ("/launcher.exe", b"MZ another program".to_vec()),
+        (
+            "/SHA256SUMS.txt",
+            format!("{}  {}\n", hex(b"MZ something else"), LAUNCHER).into_bytes(),
+        ),
+    ]);
+    let release = Release {
+        version: "0.3.0".into(),
+        launcher: format!("{base}/launcher.exe"),
+        sums: format!("{base}/SHA256SUMS.txt"),
+    };
+    assert!(install(root.path(), &release).is_err());
+    server.join().unwrap();
+    assert!(!app.join("0.3.0").exists());
+    assert_eq!(
+        std::fs::read_to_string(app.join("current.txt")).unwrap(),
+        "0.2.0\n"
+    );
+}
+
+#[test]
+fn a_version_that_is_not_a_folder_name_is_refused_before_anything_is_downloaded() {
+    let root = tempfile::tempdir().unwrap();
+    for version in ["", "..", "../x", "a/b", "v 1"] {
+        let release = Release {
+            version: version.into(),
+            launcher: "http://127.0.0.1:9/never".into(),
+            sums: "http://127.0.0.1:9/never".into(),
+        };
+        assert!(install(root.path(), &release).is_err(), "{version:?}");
+    }
+    assert!(!root.path().join("app").exists());
+}
+
+#[test]
+fn only_a_session_that_can_write_in_the_share_may_update() {
+    let root = tempfile::tempdir().unwrap();
+    assert!(!may_update(root.path()), "no app\\ folder there");
+    std::fs::create_dir_all(root.path().join("app")).unwrap();
+    assert!(may_update(root.path()));
+    assert!(std::fs::read_dir(root.path().join("app"))
+        .unwrap()
+        .next()
+        .is_none());
+}
+
+#[test]
+fn a_newer_release_is_found_and_an_older_one_is_not() {
+    let (base, server) = serve(vec![("/latest", DESCRIPTION.as_bytes().to_vec())]);
+    let url = format!("{base}/latest");
+    let found = check_at(&url, "0.2.0").unwrap();
+    assert_eq!(found.as_ref().map(|r| r.version.as_str()), Some("0.3.0"));
+    server.join().unwrap();
+    // The same release is nothing new to the launcher it is running.
+    let (base, server) = serve(vec![("/latest", DESCRIPTION.as_bytes().to_vec())]);
+    assert_eq!(check_at(&format!("{base}/latest"), "0.3.0").unwrap(), None);
+    server.join().unwrap();
+}

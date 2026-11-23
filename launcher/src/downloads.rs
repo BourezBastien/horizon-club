@@ -18,11 +18,18 @@
 //!
 //! Redirect targets must use HTTPS. Retry-After delays are capped at 60 seconds. Each destination
 //! directory is swept once before use for generated partials whose owning process has exited.
+//!
+//! Every URL the engine asks for goes through [`guard`]: only Mojang's own hosts, over HTTP or
+//! HTTPS, whose names resolve to public addresses — never a loopback, private or reserved one.
+//! The engine's own tests are the one exception (`Config.guard`), which serve from the loopback
+//! on purpose. The launcher's updates use the same downloader under [`Guard::GitHub`]: GitHub's
+//! servers alone, asked the same questions.
 use futures_util::{stream, StreamExt};
 use reqwest::{header, Client, Response, StatusCode, Url};
 use sha1::{Digest, Sha1};
 use std::{
     collections::HashMap,
+    net::{IpAddr, ToSocketAddrs},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering::Relaxed},
@@ -39,6 +46,107 @@ use tokio::{
 pub const CANCELLED: &str = "Download cancelled. Download again to go on where it stopped.";
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
 type Sweeps = HashMap<PathBuf, Arc<tokio::sync::OnceCell<()>>>;
+
+/// The hosts every URL must name ([`guard`]): Mojang's, the only servers Minecraft's files come
+/// from. Nothing else is fetched, so nothing else is allowed.
+const MOJANG_HOSTS: [&str; 5] = [
+    "piston-meta.mojang.com",
+    "piston-data.mojang.com",
+    "resources.download.minecraft.net",
+    "libraries.minecraft.net",
+    "launchermeta.mojang.com",
+];
+
+/// Whether [`guard`] checks a URL: on for every engine ([`Config::default`]), off only in the
+/// engine's own tests, which serve from the loopback.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Guard {
+    #[default]
+    Mojang,
+    /// The launcher's updates: the releases of the club's repository, on GitHub's servers.
+    GitHub,
+    /// Tests only: the local server the engine is pointed at.
+    Off,
+}
+
+/// The hosts a [`Guard`] lets a URL name.
+fn hosts_of(guard: Guard) -> Option<&'static [&'static str]> {
+    match guard {
+        Guard::Mojang => Some(&MOJANG_HOSTS),
+        Guard::GitHub => Some(horizon_addresses::GITHUB_RELEASE_HOSTS),
+        Guard::Off => None,
+    }
+}
+
+/// Whether `url` is one the engine may fetch: HTTP or HTTPS, a host of [`MOJANG_HOSTS`], and a
+/// name that resolves to public addresses only. A redirect answers the same question again, so
+/// this is asked of every URL, the first and each hop.
+pub fn guard(url: &Url) -> Result<(), String> {
+    guarded(url, &MOJANG_HOSTS)
+}
+
+/// [`guard`] for another list of hosts ([`Guard`]).
+fn guarded(url: &Url, hosts: &[&str]) -> Result<(), String> {
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(format!("{} is not an HTTP address", url));
+    }
+    let host = url.host_str().unwrap_or_default();
+    if !host_allowed(host, hosts) {
+        return Err(format!("{host} is not one of the allowed servers"));
+    }
+    let port = url.port_or_known_default().unwrap_or(80);
+    let resolved = (host, port)
+        .to_socket_addrs()
+        .map_err(|e| format!("{host} does not resolve: {e}"))?;
+    let mut addresses = resolved.map(|a| a.ip()).peekable();
+    if addresses.peek().is_none() {
+        return Err(format!("{host} resolves to nothing"));
+    }
+    for ip in addresses {
+        if !address_allowed(ip) {
+            return Err(format!(
+                "{host} resolves to {ip}, which is not a public address"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Whether `host` names one of `hosts` (case apart), and not by a name for this computer.
+fn host_allowed(host: &str, hosts: &[&str]) -> bool {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    host != "localhost" && hosts.contains(&host.as_str())
+}
+
+/// Whether `ip` is an address on the public internet: never a loopback, private, link-local,
+/// unspecified, multicast, reserved or otherwise special-purpose one (RFC 1918, RFC 4193 and
+/// their kind). `is_shared` (100.64/10) is unstable still, so that range is spelled out.
+fn address_allowed(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let shared = v4.octets()[0] == 100 && (64..=127).contains(&v4.octets()[1]);
+            !(v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_multicast()
+                || v4.is_documentation()
+                || shared)
+        }
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => address_allowed(IpAddr::V4(v4)),
+            None => {
+                !(v6.is_loopback()
+                    || v6.is_unspecified()
+                    || v6.is_multicast()
+                    || v6.is_unique_local()
+                    || v6.is_unicast_link_local())
+            }
+        },
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub files: usize,
@@ -51,6 +159,8 @@ pub struct Config {
     pub read_timeout: Duration,
     pub retries: u32,
     pub buffer: usize,
+    /// Whether every URL is checked against Mojang's hosts. Tests alone turn it off.
+    pub guard: Guard,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -65,6 +175,14 @@ impl Default for Config {
             read_timeout: Duration::from_secs(30),
             retries: 5,
             buffer: 128 << 10,
+            // A test binary fetches from a server on the loopback, which the guard exists to
+            // refuse: it is off there, on in every build a player runs. A test of the guard
+            // itself calls [`guard`] directly.
+            guard: if cfg!(test) {
+                Guard::Off
+            } else {
+                Guard::Mojang
+            },
         }
     }
 }
@@ -294,6 +412,11 @@ impl Downloader {
     ) -> Result<Connection<'_>, Failure> {
         let mut url = Url::parse(url).map_err(Failure::permanent)?;
         for _ in 0..=10 {
+            // Every URL, the first and each redirect hop, is one of the guard's hosts; a
+            // refused one is an error, not a request that goes out anyway.
+            if let Some(hosts) = hosts_of(self.config.guard) {
+                guarded(&url, hosts).map_err(Failure::permanent)?;
+            }
             let host = url
                 .host_str()
                 .ok_or_else(|| Failure::permanent("URL has no host"))?
@@ -754,6 +877,17 @@ impl Downloader {
     }
     /// Metadata is small and must be parsed before dependent work can be queued.
     pub async fn metadata(&self, url: &str, cancel: &AtomicBool) -> Result<Vec<u8>, String> {
+        self.fetch(url, cancel, 16 << 20).await
+    }
+
+    /// A whole resource in memory, up to `limit` bytes: a small document ([`Self::metadata`]),
+    /// or one file of a release (`update`).
+    pub async fn fetch(
+        &self,
+        url: &str,
+        cancel: &AtomicBool,
+        limit: usize,
+    ) -> Result<Vec<u8>, String> {
         let operation = async {
             for attempt in 0..=self.config.retries {
                 let result = async {
@@ -763,8 +897,10 @@ impl Downloader {
                     }
                     let mut body = Vec::new();
                     while let Some(chunk) = connection.response.chunk().await? {
-                        if body.len() + chunk.len() > 16 << 20 {
-                            return Err(Failure::permanent("Metadata exceeds 16 MiB"));
+                        if body.len() + chunk.len() > limit {
+                            return Err(Failure::permanent(format!(
+                                "Response exceeds {limit} bytes"
+                            )));
                         }
                         self.metrics
                             .counters
@@ -1001,6 +1137,105 @@ impl Drop for BatchPending {
             .counters
             .failed
             .fetch_add(self.remaining, Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod guard_tests {
+    use super::*;
+
+    fn url(text: &str) -> Url {
+        Url::parse(text).unwrap()
+    }
+
+    /// The pure halves of the guard: which hosts, and which addresses. The name resolution
+    /// between them is the network's, and is asked in `guard` itself.
+    #[test]
+    fn only_mojangs_hosts_are_allowed() {
+        for host in MOJANG_HOSTS {
+            assert!(host_allowed(host, &MOJANG_HOSTS), "{host}");
+            assert!(
+                host_allowed(&host.to_ascii_uppercase(), &MOJANG_HOSTS),
+                "{host}, any case"
+            );
+        }
+        for other in [
+            "localhost",
+            "",
+            "example.com",
+            "piston-meta.mojang.com.evil.example",
+            "mojang.com",
+            "192.168.1.10",
+            "not-mojang.download.minecraft.net",
+        ] {
+            assert!(!host_allowed(other, &MOJANG_HOSTS), "{other}");
+        }
+    }
+
+    /// The update's guard lets GitHub's servers alone: neither Mojang's nor a look-alike's.
+    #[test]
+    fn the_updates_guard_allows_githubs_servers_alone() {
+        let github = horizon_addresses::GITHUB_RELEASE_HOSTS;
+        assert_eq!(hosts_of(Guard::GitHub), Some(github));
+        assert_eq!(hosts_of(Guard::Off), None);
+        for host in github {
+            assert!(host_allowed(host, github), "{host}");
+            assert!(!host_allowed(host, &MOJANG_HOSTS), "{host} is not Mojang's");
+        }
+        assert!(!host_allowed("piston-meta.mojang.com", github));
+        assert!(!host_allowed("api.github.com.evil.example", github));
+        assert!(!host_allowed("raw.githubusercontent.com", github));
+    }
+
+    #[test]
+    fn only_public_addresses_are_allowed() {
+        let ip = |text: &str| text.parse::<IpAddr>().unwrap();
+        for public in ["8.8.8.8", "13.107.4.50", "::ffff:8.8.8.8", "2600:9000::1"] {
+            assert!(address_allowed(ip(public)), "{public}");
+        }
+        for refused in [
+            ("127.0.0.1", "loopback"),
+            ("10.0.0.1", "private"),
+            ("172.16.0.1", "private"),
+            ("192.168.1.2", "private"),
+            ("169.254.1.1", "link-local"),
+            ("0.0.0.0", "unspecified"),
+            ("255.255.255.255", "broadcast"),
+            ("224.0.0.1", "multicast"),
+            ("100.64.0.1", "shared (carrier NAT)"),
+            ("192.0.2.1", "documentation"),
+            ("::1", "loopback, v6"),
+            ("::", "unspecified, v6"),
+            ("fc00::1", "unique local, v6"),
+            ("fd12:3456:789a::1", "unique local, v6"),
+            ("fe80::1", "link-local, v6"),
+            ("ff02::1", "multicast, v6"),
+            ("::ffff:192.168.0.1", "a private v4 through v6"),
+        ] {
+            assert!(
+                !address_allowed(ip(refused.0)),
+                "{}: {}",
+                refused.0,
+                refused.1
+            );
+        }
+    }
+
+    /// A URL the guard refuses never reaches the network: wrong scheme or wrong host is said
+    /// before the name is even resolved. (Resolving a real Mojang host is the network's
+    /// business; every URL here is refused before that.)
+    #[test]
+    fn a_url_outside_mojangs_servers_is_refused_before_any_request() {
+        for refused in [
+            "ftp://piston-meta.mojang.com/x",
+            "file:///etc/passwd",
+            "http://localhost/x",
+            "http://127.0.0.1:8130/x",
+            "http://example.com/x",
+            "http://piston-meta.mojang.com.attacker.example/x",
+        ] {
+            assert!(guard(&url(refused)).is_err(), "{refused}");
+        }
     }
 }
 

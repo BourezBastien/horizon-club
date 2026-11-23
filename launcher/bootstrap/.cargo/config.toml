@@ -1,0 +1,5 @@
+# The C runtime inside the executable: the school's computers may not have the Visual C++
+# Redistributable, and a program that needs VCRUNTIME140.dll does not start without it. This is
+# the flag Horizon's own release builds use (game-build.yml, launcher.yml).
+[build]
+rustflags = ["-C", "target-feature=+crt-static"]

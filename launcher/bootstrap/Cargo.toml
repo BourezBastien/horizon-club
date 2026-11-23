@@ -1,0 +1,12 @@
+[package]
+name = "horizon-club-bootstrap"
+version = "0.1.0"
+edition = "2021"
+license = "LGPL-3.0-or-later"
+description = "Horizon Club's stable entry point: starts the launcher's current version"
+
+[workspace]
+
+[profile.release]
+opt-level = "s"
+strip = true

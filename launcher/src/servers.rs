@@ -1,19 +1,22 @@
-//! Servers hosted from the launcher. Every server is a `horizon-server` folder and the launcher drives
-//! `horizon-server` (docs/server.md in the repository) rather than its own copy of the logic: `init`,
-//! `start`, `stop`, `config set`, `backup`, `restore`, `update`, `service`, and the control API the running
-//! supervisor serves on 127.0.0.1 for the live status, the log and console commands.
+//! Servers hosted from the launcher (docs/school-edition/launcher-target.md, section 7). Every
+//! server is a `horizon-server` folder of its own in the launcher's data folder, and the launcher
+//! drives the supervisor (`horizon-server`) rather than its own copy of the logic: `init`,
+//! `start`, `stop`, `config set`, `backup`, `restore`, and the control API the running supervisor
+//! serves on 127.0.0.1 for the live status, the log and console commands.
 //!
-//! The programs come from an installed Horizon version, laid out as `install.sh` lays them out
-//! (`server-runtime/releases/<tag>`, `current`, `game-files/`), so `horizon-server update` and its
-//! rollback work on them unchanged. The game files are the player's own, copied from the version the
-//! launcher prepared: nothing of Mojang's is downloaded or shipped.
+//! Nothing is copied: the supervisor and the engine it starts (`horizon-client --dedicated`) run
+//! in place from the build in use, `<root>\core\<tag>\`, read-only on the share, and the server's
+//! `server.toml` points `[engine] resources` at that build's prepared folder. A hosted server
+//! plays offline (`online_mode = false`: the edition has no accounts) and takes a port from the
+//! club's `[hosting]` range. It lives as long as its launcher window, which stops the servers it
+//! started when it closes, and announces it in `<root>\online\` while it runs (`online.rs`).
 
 use crate::backend;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs;
 use std::io::Write;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -23,34 +26,14 @@ const PROGRAM: &str = if cfg!(windows) {
     "horizon-server"
 };
 
-/// The Minecraft EULA a server owner agrees to.
-pub const EULA_URL: &str = "https://aka.ms/MinecraftEULA";
-
 // ----- The list of servers -----------------------------------------------------------------------
 
-/// One server the launcher knows: its name and its folder, on this computer or on `host`.
+/// One server the launcher knows: its name and its folder on this computer.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
     pub name: String,
     pub dir: PathBuf,
-    /// The other computer it runs on, reached over SSH (`user@host`, or a `Host` from `~/.ssh/config`);
-    /// `dir` is then the folder there ([`remote`]).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub host: Option<String>,
 }
-
-impl Entry {
-    /// `horizon-server --dir <dir> <args>`, here or over SSH on the entry's computer.
-    pub fn command(&self, args: &[&str]) -> Result<Command, String> {
-        match &self.host {
-            Some(host) => remote::command(host, &self.dir.to_string_lossy(), args),
-            None => command(&self.dir, args),
-        }
-    }
-}
-
-#[path = "servers/remote.rs"]
-pub mod remote;
 
 /// The game mode a server's `server.toml` sets (`[world] game_mode`), read from the file
 /// without asking `horizon-server`: the Servers page's list says it for each stopped server.
@@ -68,16 +51,13 @@ fn list_file() -> PathBuf {
     backend::data_dir().join("servers.json")
 }
 
-/// The servers, in the order they were added; folders on this computer that are gone are left out.
+/// The servers, in the order they were added; folders that are gone are left out.
 pub fn list() -> Vec<Entry> {
     let entries: Vec<Entry> = fs::read_to_string(list_file())
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or_default();
-    entries
-        .into_iter()
-        .filter(|e| e.host.is_some() || e.dir.is_dir())
-        .collect()
+    entries.into_iter().filter(|e| e.dir.is_dir()).collect()
 }
 
 fn save_list(entries: &[Entry]) -> Result<(), String> {
@@ -99,36 +79,31 @@ fn save_list(entries: &[Entry]) -> Result<(), String> {
 /// Adds a server folder to the list (once).
 pub fn add(entry: Entry) -> Result<(), String> {
     let mut all = list();
-    all.retain(|e| (&e.host, &e.dir) != (&entry.host, &entry.dir));
+    all.retain(|e| e.dir != entry.dir);
     all.push(entry);
     save_list(&all)
 }
 
-/// Takes a server on this computer off the list; its folder stays.
+/// Takes a server off the list; its folder stays.
 pub fn forget(dir: &Path) -> Result<(), String> {
     let mut all = list();
-    all.retain(|e| e.host.is_some() || e.dir != dir);
-    save_list(&all)
-}
-
-/// Takes a server on another computer off the list; nothing there changes.
-pub fn forget_remote(host: &str, dir: &Path) -> Result<(), String> {
-    let mut all = list();
-    all.retain(|e| e.host.as_deref() != Some(host) || e.dir != dir);
+    all.retain(|e| e.dir != dir);
     save_list(&all)
 }
 
 /// Removes a registered, stopped server, retaining its files in the system trash.
 pub fn delete(dir: &Path) -> Result<(), String> {
     if !list().iter().any(|entry| entry.dir == dir) {
-        return Err("This server is no longer in the launcher’s list.".into());
-    }
-    if service_installed(dir) {
-        return Err("Turn off running in the background before deleting this server.".into());
+        return Err(
+            crate::i18n::tr("This server is no longer in the launcher's list.").to_string(),
+        );
     }
     trash_stopped_server(dir, crate::desktop_seams::to_trash)?;
     forget(dir).map_err(|e| {
-        format!("The server was moved to the trash, but its list could not be saved: {e}")
+        crate::i18n::trf(
+            "The server was moved to the trash, but its list could not be saved: {error}",
+            &[("error", &e)],
+        )
     })
 }
 
@@ -143,7 +118,7 @@ fn trash_stopped_server(
         .is_symlink()
         || !dir.join("server.toml").is_file()
     {
-        return Err("This is not a server folder.".into());
+        return Err(crate::i18n::tr("This is not a server folder.").to_string());
     }
     let state = dir.join(".horizon");
     fs::create_dir_all(&state).map_err(|e| e.to_string())?;
@@ -156,13 +131,18 @@ fn trash_stopped_server(
         .open(state.join("lock"))
         .map_err(|e| e.to_string())?;
     lock.try_lock()
-        .map_err(|_| "Stop the server before deleting it.".to_string())?;
+        .map_err(|_| crate::i18n::tr("Stop the server before deleting it.").to_string())?;
     // Windows can't move a folder while a file in it is open, the lock included: let it go
     // first. Still safe: a supervisor starting in between opens the lock again, and then the
     // move fails instead of taking a live server.
     #[cfg(windows)]
     drop(lock);
-    trash(dir).map_err(|e| format!("Could not move the server to the trash: {e}"))
+    trash(dir).map_err(|e| {
+        crate::i18n::trf(
+            "Could not move the server to the trash: {error}",
+            &[("error", &e)],
+        )
+    })
 }
 
 /// A folder name for a server name: lower case letters, digits and dashes.
@@ -196,478 +176,36 @@ pub fn new_folder(name: &str) -> PathBuf {
     dir
 }
 
-// ----- The programs: an installed Horizon version, laid out as install.sh does ---------------------
+// ----- The programs: the build in use, read in place ----------------------------------------------
 
-pub fn runtime_root() -> PathBuf {
-    backend::data_dir().join(RUNTIME)
+/// `horizon-server` of the build in use, `<root>\core\<tag>\horizon-server.exe`, read in place
+/// from the share: nothing is copied, and the supervisor finds the engine and the game's files
+/// beside itself.
+pub fn program(tag: &str) -> Option<PathBuf> {
+    Some(backend::version_dir(tag).join(PROGRAM)).filter(|p| p.is_file())
 }
 
-/// The servers' programs in the launcher's data.
-const RUNTIME: &str = "server-runtime";
-
-/// The names horizon-server gives its background services: `name` and `launchd_label` in
-/// crates/horizon-server/src/service.rs, which the launcher doesn't depend on.
-#[cfg_attr(target_os = "macos", allow(dead_code))]
-const SERVICE_PREFIX: &str = "horizon-server-";
-#[cfg(target_os = "macos")]
-const LAUNCHD_PREFIX: &str = "dev.horizon.server.";
-
-/// Horizon server services registered on this computer, for any server and in any scope, read
-/// from the system's own registrations (no server program is run). An unreadable one is an error.
-pub(crate) fn registered_services() -> Result<Vec<String>, String> {
-    #[cfg(windows)]
-    {
-        scheduled_tasks().map(horizon_tasks)
-    }
-    #[cfg(not(windows))]
-    {
-        let home = std::env::var_os("HOME").map(PathBuf::from);
-        #[cfg(target_os = "macos")]
-        let folders = [(
-            home.ok_or("HOME is not set")?.join("Library/LaunchAgents"),
-            LAUNCHD_PREFIX,
-            ".plist",
-        )];
-        #[cfg(not(target_os = "macos"))]
-        let folders = {
-            let config = std::env::var_os("XDG_CONFIG_HOME")
-                .map(PathBuf::from)
-                .or_else(|| home.map(|home| home.join(".config")))
-                .ok_or("HOME is not set")?;
-            [
-                (config.join("systemd/user"), SERVICE_PREFIX, ".service"),
-                (
-                    PathBuf::from("/etc/systemd/system"),
-                    SERVICE_PREFIX,
-                    ".service",
-                ),
-            ]
-        };
-        let mut found = Vec::new();
-        for (folder, prefix, suffix) in folders {
-            let entries = match fs::read_dir(&folder) {
-                Ok(entries) => entries,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(format!("{}: {e}", folder.display())),
-            };
-            for entry in entries {
-                let entry = entry.map_err(|e| format!("{}: {e}", folder.display()))?;
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if name.starts_with(prefix) && name.ends_with(suffix) {
-                    found.push(name);
-                }
-            }
-        }
-        Ok(found)
-    }
-}
-
-/// The names among `tasks` that horizon-server registered.
-#[cfg(any(windows, test))]
-fn horizon_tasks(tasks: Vec<String>) -> Vec<String> {
-    tasks
-        .into_iter()
-        .filter(|name| name.starts_with(SERVICE_PREFIX))
-        .collect()
-}
-
-/// The tasks in Task Scheduler's root folder, where horizon-server registers its own, hidden ones
-/// too, read through the scheduler's own interface.
-#[cfg(windows)]
-fn scheduled_tasks() -> Result<Vec<String>, String> {
-    use std::mem::ManuallyDrop;
-    use windows::core::BSTR;
-    use windows::Win32::Foundation::RPC_E_CHANGED_MODE;
-    use windows::Win32::System::Com::{
-        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
-        COINIT_MULTITHREADED,
-    };
-    use windows::Win32::System::TaskScheduler::{ITaskService, TaskScheduler, TASK_ENUM_HIDDEN};
-    use windows::Win32::System::Variant::{VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_I4};
-    // SAFETY: plain COM calls on this thread; COM is released only if this call started it, and
-    // a thread already in the other apartment mode can still use it.
-    let started = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
-    if started.is_err() && started != RPC_E_CHANGED_MODE {
-        return Err(windows::core::Error::from(started).to_string());
-    }
-    // Errors become text, and every interface is released, before COM is.
-    let names = unsafe {
-        (|| {
-            let service: ITaskService =
-                CoCreateInstance(&TaskScheduler, None, CLSCTX_INPROC_SERVER)?;
-            let local = VARIANT::default();
-            service.Connect(&local, &local, &local, &local)?;
-            let tasks = service
-                .GetFolder(&BSTR::from("\\"))?
-                .GetTasks(TASK_ENUM_HIDDEN.0)?;
-            let mut names = Vec::new();
-            // The collection counts from 1.
-            for index in 1..=tasks.Count()? {
-                let index = VARIANT {
-                    Anonymous: VARIANT_0 {
-                        Anonymous: ManuallyDrop::new(VARIANT_0_0 {
-                            vt: VT_I4,
-                            Anonymous: VARIANT_0_0_0 { lVal: index },
-                            ..Default::default()
-                        }),
-                    },
-                };
-                names.push(tasks.get_Item(&index)?.Name()?.to_string());
-            }
-            Ok::<_, windows::core::Error>(names)
-        })()
-        .map_err(|e| e.to_string())
-    };
-    if started.is_ok() {
-        unsafe { CoUninitialize() };
-    }
-    names
-}
-
-/// The server runtime's links in the launcher's data, which a move leaves out and makes again
-/// in the new folder: `current` to the release it selects, and each release's
-/// `.local/horizon-client` to the servers' game files. Found without following any link.
-#[derive(Debug, Default)]
-pub(crate) struct RuntimeLinks {
-    release: Option<std::ffi::OsString>,
-    game_files: Vec<std::ffi::OsString>,
-}
-
-impl RuntimeLinks {
-    /// The links in the runtime of the launcher's data at `launcher` (its checked, canonical
-    /// path; `written` is how the launcher spelled it when it made the links, perhaps through a
-    /// linked parent folder). A `current` or game-files link that points anywhere else is
-    /// refused, as any link a move can't make again.
-    pub(crate) fn find(launcher: &Path, written: &Path) -> Result<Self, String> {
-        let root = launcher.join(RUNTIME);
-        // Whether link text names `inside` the runtime, under either spelling of the folder.
-        let ours = |text: &Path, inside: &Path| {
-            [launcher, written]
-                .into_iter()
-                .any(|spelling| same_target(text, &spelling.join(RUNTIME).join(inside)))
-        };
-        let releases = root.join("releases");
-        let mut links = Self::default();
-        let refused = |link: &Path| {
-            format!(
-                "{} is a link Horizon did not make; remove it, or set the servers up again, before moving data",
-                link.display()
-            )
-        };
-        // A linked data folder is the copy's to refuse; a linked runtime is refused here.
-        if is_link(&root) {
-            return Err(refused(&root));
-        }
-        if !(plain_dir(launcher) && plain_dir(&root)) {
-            return Ok(links);
-        }
-        let current = root.join("current");
-        if is_link(&current) {
-            // Read once; its whole text must name `releases/<tag>` before any folder is looked at.
-            let text = fs::read_link(&current).map_err(|_| refused(&current))?;
-            let tag = match text.components().next_back() {
-                Some(Component::Normal(tag)) => tag.to_owned(),
-                _ => return Err(refused(&current)),
-            };
-            // Alone it must still be one plain name: a verbatim path can end in one that a join
-            // would read as rooted.
-            let mut parts = Path::new(&tag).components();
-            let single = matches!(
-                (parts.next(), parts.next()),
-                (Some(Component::Normal(name)), None) if name == tag.as_os_str()
-            );
-            if !single || tag.to_string_lossy().contains(['/', '\\']) {
-                return Err(refused(&current));
-            }
-            if !(ours(&text, &Path::new("releases").join(&tag))
-                && plain_dir(&releases)
-                && plain_dir(&releases.join(&tag)))
-            {
-                return Err(refused(&current));
-            }
-            links.release = Some(tag);
-        }
-        if !plain_dir(&releases) {
-            return Ok(links);
-        }
-        for entry in fs::read_dir(&releases).map_err(|e| format!("{}: {e}", releases.display()))? {
-            let entry = entry.map_err(|e| format!("{}: {e}", releases.display()))?;
-            let local = entry.path().join(".local");
-            let link = local.join("horizon-client");
-            if !plain_dir(&entry.path()) || !plain_dir(&local) || !is_link(&link) {
-                continue;
-            }
-            let text = fs::read_link(&link).map_err(|_| refused(&link))?;
-            if !(ours(&text, Path::new("game-files/horizon-client"))
-                && plain_dir(&root.join("game-files"))
-                && plain_dir(&root.join("game-files/horizon-client")))
-            {
-                return Err(refused(&link));
-            }
-            links.game_files.push(entry.file_name());
-        }
-        Ok(links)
-    }
-
-    /// The links' paths under `launcher`, for the copy to leave out.
-    pub(crate) fn paths(&self, launcher: &Path) -> Vec<PathBuf> {
-        let root = launcher.join(RUNTIME);
-        let local = |tag: &std::ffi::OsString| {
-            root.join("releases")
-                .join(tag)
-                .join(".local/horizon-client")
-        };
-        let current = self.release.as_ref().map(|_| root.join("current"));
-        self.game_files.iter().map(local).chain(current).collect()
-    }
-
-    /// Makes the links again in the runtime of the moved data at `launcher`, at their vacant
-    /// names, and checks them before the move is committed.
-    pub(crate) fn make(&self, launcher: &Path) -> Result<(), String> {
-        let root = launcher.join(RUNTIME);
-        let files = root.join("game-files/horizon-client");
-        let mut made = Vec::new();
-        for tag in &self.game_files {
-            made.push((
-                root.join("releases")
-                    .join(tag)
-                    .join(".local/horizon-client"),
-                files.clone(),
-            ));
-        }
-        if let Some(tag) = &self.release {
-            made.push((root.join("current"), root.join("releases").join(tag)));
-        }
-        for (link, target) in &made {
-            dir_link(target, link)
-                .map_err(|e| format!("{} → {}: {e}", link.display(), target.display()))?;
-            let folder = link.parent().unwrap_or(&root);
-            crate::data_location::sync_dir(folder)?;
-            // The target and its parent are folders themselves, so the link ends in the runtime.
-            let parent = target.parent().unwrap_or(&root);
-            if !(is_link(link) && links_to(link, target) && plain_dir(parent) && plain_dir(target))
-            {
-                return Err(format!("{} was not made again", link.display()));
-            }
-        }
-        Ok(())
-    }
-}
-
-/// Whether `path` is a folder itself, not a link to one.
-fn plain_dir(path: &Path) -> bool {
-    fs::symlink_metadata(path)
-        .is_ok_and(|meta| meta.is_dir() && crate::data_location::reject_link(path, &meta).is_ok())
-}
-
-/// Whether `path` is a symlink or junction, without following it.
-fn is_link(path: &Path) -> bool {
-    fs::symlink_metadata(path)
-        .is_ok_and(|meta| crate::data_location::reject_link(path, &meta).is_err())
-}
-
-/// Whether the link at `link` is written as pointing at `target` (read, never followed).
-fn links_to(link: &Path, target: &Path) -> bool {
-    fs::read_link(link).is_ok_and(|text| same_target(&text, target))
-}
-
-/// Whether link text `written` names `target`.
-fn same_target(written: &Path, target: &Path) -> bool {
-    #[cfg(windows)]
-    {
-        // A junction reads back with a verbatim prefix (`\\?\C:\`, `\\?\UNC\`). Nothing else is
-        // normalised (no case folding; a name that isn't Unicode never matches): the launcher
-        // wrote these links, so another spelling is not one of them.
-        let plain = |path: &Path| -> Option<PathBuf> {
-            let text = path.to_str()?;
-            Some(match text.strip_prefix(r"\\?\UNC\") {
-                Some(share) => PathBuf::from(format!(r"\\{share}")),
-                None => PathBuf::from(text.strip_prefix(r"\\?\").unwrap_or(text)),
-            })
-        };
-        plain(written).is_some_and(|written| Some(written) == plain(target))
-    }
-    #[cfg(not(windows))]
-    {
-        written == target
-    }
-}
-
-/// Makes `link`, which must not exist, point at the folder `target`.
-fn dir_link(target: &Path, link: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::symlink(target, link)
-    }
-    #[cfg(windows)]
-    {
-        crate::sources::junction(target, link)
-    }
-}
-
-/// `horizon-server` of the release in use, once one is set up.
-pub fn program() -> Option<PathBuf> {
-    Some(runtime_root().join("current").join(PROGRAM)).filter(|p| p.is_file())
-}
-
-/// The release the servers run.
-pub fn runtime_release() -> Option<String> {
-    let target = fs::canonicalize(runtime_root().join("current")).ok()?;
-    Some(target.file_name()?.to_string_lossy().into_owned())
-}
-
-/// Where `horizon-server` finds the game files: the folder install.sh keeps across updates.
-pub fn game_files(root: &Path, game_version: &str) -> PathBuf {
-    root.join("game-files/horizon-client").join(game_version)
-}
-
-/// Whether the servers' game files are there.
-pub fn game_files_ready() -> bool {
-    game_files(&runtime_root(), "26.3")
-        .join("horizon-resources.json")
-        .is_file()
-}
-
-/// Whether an installed version can host: it ships `horizon-server` and is prepared.
+/// Whether the build `tag` can host: it ships `horizon-server` and is prepared. The launcher
+/// prepares and installs nothing itself: what is missing is the supervisor's to put in place.
 pub fn can_host(tag: &str) -> Result<(), String> {
     if !backend::version_dir(tag).join(PROGRAM).is_file() {
-        return Err(format!(
-            "Horizon {tag} has no server program. Install a newer version on the Versions page."
+        return Err(crate::i18n::trf(
+            "{version} has no server program, so it can't host. Ask the club's supervisor for a \
+             build that has one.",
+            &[("version", tag)],
         ));
     }
     if !backend::check_prepared(tag) {
-        return Err(format!(
-            "Horizon {tag} isn't prepared yet: press Prepare on the Play page (it uses your own Minecraft {})",
-            backend::game_version(tag)
-        ));
+        return Err(backend::not_prepared(tag));
     }
     Ok(())
-}
-
-/// Sets up the servers' programs from the installed version `tag` (if none are yet) and copies its
-/// prepared game files for them. Safe to run again: it only refreshes the game files.
-pub fn set_up(tag: &str) -> Result<(), String> {
-    can_host(tag)?;
-    // The data generator's reports the game reads at run time, as Play checks them.
-    backend::need_prepared(tag)?;
-    set_up_in(
-        &runtime_root(),
-        &backend::version_dir(tag),
-        tag,
-        &backend::game_version(tag),
-    )
-}
-
-/// [`set_up`] with its folders given (for tests).
-pub fn set_up_in(root: &Path, version: &Path, tag: &str, game_version: &str) -> Result<(), String> {
-    let releases = root.join("releases");
-    fs::create_dir_all(&releases).map_err(|e| format!("{}: {e}", releases.display()))?;
-    let release = releases.join(tag);
-    if !root.join("current").exists() {
-        if !release.join(PROGRAM).is_file() {
-            let scratch = releases.join(format!(".{tag}.copying"));
-            let _ = fs::remove_dir_all(&scratch);
-            copy_release(version, &scratch).map_err(|e| format!("copying {tag}: {e}"))?;
-            let _ = fs::remove_dir_all(&release);
-            fs::rename(&scratch, &release).map_err(|e| e.to_string())?;
-        }
-        let local = release.join(".local");
-        fs::create_dir_all(&local).map_err(|e| e.to_string())?;
-        let link = local.join("horizon-client");
-        if link.symlink_metadata().is_err() {
-            fs::create_dir_all(root.join("game-files/horizon-client"))
-                .map_err(|e| e.to_string())?;
-            point(&link, &root.join("game-files/horizon-client")).map_err(|e| e.to_string())?;
-        }
-        point(&root.join("current"), &release).map_err(|e| e.to_string())?;
-    }
-    // The game leases the folder it is started from and opens its completion marker there. A copy
-    // of a release is an installation, as install.sh lays one out, so it needs the marker too.
-    let running = fs::canonicalize(root.join("current")).unwrap_or(release);
-    complete(&running)?;
-    // The game files: a copy (preparing again rewrites files in place), swapped in whole.
-    let from = version.join(".local/horizon-client").join(game_version);
-    let to = game_files(root, game_version);
-    let fresh = to.with_extension("copying");
-    let _ = fs::remove_dir_all(&fresh);
-    copy_dir(&from, &fresh).map_err(|e| format!("copying the game files: {e}"))?;
-    let old = to.with_extension("old");
-    let _ = fs::remove_dir_all(&old);
-    if to.exists() {
-        fs::rename(&to, &old).map_err(|e| e.to_string())?;
-    }
-    fs::rename(&fresh, &to).map_err(|e| e.to_string())?;
-    let _ = fs::remove_dir_all(&old);
-    Ok(())
-}
-
-/// The completion marker the game opens in the folder it runs from: an empty ordinary file, as the
-/// launcher's installs have. The copy of a release is an installation, as install.sh lays one out,
-/// and without the marker the engine exits before loading a world.
-fn complete(release: &Path) -> Result<(), String> {
-    horizon_platform::mod_package::runtime_leases::write_completion(release)
-        .map_err(|e| format!("{}: {e}", release.join(backend::COMPLETE).display()))
-}
-
-/// A release folder without the launcher's own files (its prepared copy, install marker and the
-/// game's macOS app bundle).
-fn copy_release(from: &Path, to: &Path) -> std::io::Result<()> {
-    fs::create_dir_all(to)?;
-    for entry in fs::read_dir(from)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        if name == ".local" || name == ".installed" || name == "Horizon.app" {
-            continue;
-        }
-        let target = to.join(&name);
-        if entry.file_type()?.is_dir() {
-            copy_dir(&entry.path(), &target)?;
-        } else {
-            fs::copy(entry.path(), &target)?;
-        }
-    }
-    Ok(())
-}
-
-fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
-    fs::create_dir_all(to)?;
-    for entry in fs::read_dir(from)? {
-        let entry = entry?;
-        let target = to.join(entry.file_name());
-        let kind = entry.file_type()?;
-        if kind.is_dir() {
-            copy_dir(&entry.path(), &target)?;
-        } else if kind.is_file() {
-            fs::copy(entry.path(), target)?;
-        }
-    }
-    Ok(())
-}
-
-/// Makes `link` point at the folder `target`, as install.sh (a symbolic link) and install.ps1 (a
-/// junction, which needs no admin rights) do.
-fn point(link: &Path, target: &Path) -> std::io::Result<()> {
-    let fresh = link.with_extension("switching");
-    let _ = fs::remove_file(&fresh);
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::symlink(target, &fresh)?;
-        fs::rename(&fresh, link)
-    }
-    #[cfg(windows)]
-    {
-        let _ = fs::remove_dir(link);
-        crate::sources::junction(target, link)
-    }
 }
 
 // ----- Running horizon-server -------------------------------------------------------------------
 
-/// `horizon-server --dir <dir> <args>`.
-pub fn command(dir: &Path, args: &[&str]) -> Result<Command, String> {
-    let program = program().ok_or(
-        "The server programs aren't set up yet: create a server, or press Prepare on its page.",
-    )?;
+/// `horizon-server --dir <dir> <args>`, from the build `tag` in use.
+pub fn command(tag: &str, dir: &Path, args: &[&str]) -> Result<Command, String> {
+    let program = program(tag).ok_or_else(backend::no_version_installed)?;
     let mut cmd = crate::process::command(program);
     cmd.arg("--dir").arg(dir).args(args);
     Ok(cmd)
@@ -682,13 +220,18 @@ fn log_length(dir: &Path) -> u64 {
 }
 
 /// Runs one `horizon-server` command to its end: what it printed, or the problem in plain words.
-pub fn run(dir: &Path, args: &[&str]) -> Result<String, Problem> {
+pub fn run(tag: &str, dir: &Path, args: &[&str]) -> Result<String, Problem> {
     let since = log_length(dir);
-    let output = command(dir, args)
+    let output = command(tag, dir, args)
         .map_err(Problem::plain)?
         .stdin(Stdio::null())
         .output()
-        .map_err(|e| Problem::plain(format!("Couldn't run horizon-server: {e}")))?;
+        .map_err(|e| {
+            Problem::plain(crate::i18n::trf(
+                "Couldn't run horizon-server: {error}",
+                &[("error", &e.to_string())],
+            ))
+        })?;
     let out = String::from_utf8_lossy(&output.stdout).into_owned();
     if output.status.success() {
         Ok(out)
@@ -699,60 +242,28 @@ pub fn run(dir: &Path, args: &[&str]) -> Result<String, Problem> {
 }
 
 /// Runs a long `horizon-server` command, passing each line it prints to `line`.
-pub fn run_streamed(dir: &Path, args: &[&str], line: &dyn Fn(String)) -> Result<(), Problem> {
-    stream(dir, command(dir, args).map_err(Problem::plain)?, line)
-}
-
-/// Launcher-managed Start/Restart: prepare data using the supervisor's own command description.
-/// The standalone supervisor still has no jar downloader or consent policy.
-pub fn run_managed(
+pub fn run_streamed(
+    tag: &str,
     dir: &Path,
     args: &[&str],
     line: &dyn Fn(String),
-    permission: crate::jars::Permission<'_>,
 ) -> Result<(), Problem> {
-    let supervisor = command(dir, args).map_err(Problem::plain)?;
-    let mut engine =
-        horizon_server_launch::engine_command(Path::new(supervisor.get_program()), dir).map_err(
-            |error| {
-                let mut problem = Problem::plain(error.to_string());
-                if matches!(
-                    error,
-                    horizon_server_launch::EngineCommandError::Resources(_)
-                ) {
-                    problem.fix = Some(Fix::Prepare);
-                }
-                problem
-            },
-        )?;
-    crate::jars::prepare_launch(&mut engine, &crate::launch::Launch::default(), permission)
-        .map_err(|error| Problem::plain(error.to_string()))?;
-    // Windows has no holder for a supervisor-hosted engine: the game only leases units that are
-    // already registered, so the launcher registers and holds the ones it computes, after the
-    // release folder is published and before the supervisor starts the engine. The supervisor does
-    // the same before every start, which covers a release an update switches to.
-    #[cfg(windows)]
-    let _leases = lease_engine(&engine, &backend::data_dir())?;
-    stream(dir, supervisor, line)
+    stream(dir, command(tag, dir, args).map_err(Problem::plain)?, line)
 }
 
-/// Marks the engine's own folder complete and holds the leases of every unit the game it runs
-/// computes at start. The claims live until [`run_managed`] returns.
-#[cfg(windows)]
-fn lease_engine(engine: &Command, data: &Path) -> Result<Vec<crate::run_leases::Claim>, Problem> {
-    let program = Path::new(engine.get_program());
-    let folder = program.parent().unwrap_or_else(|| Path::new("."));
-    let release = fs::canonicalize(folder).unwrap_or_else(|_| folder.to_path_buf());
-    let data = fs::canonicalize(data).unwrap_or_else(|_| data.to_path_buf());
-    // `[engine] engine.path` and the PATH can name an engine that is not the launcher's copy, and a
-    // version the cleanup invalidated keeps its marker missing: only the launcher's own runtime is
-    // ours to complete and to hold.
-    if !release.starts_with(data.join("server-runtime")) {
-        return Ok(Vec::new());
-    }
-    complete(&release).map_err(Problem::plain)?;
-    crate::run_leases::game_units_in(engine, program, &data)
-        .map_err(|error| Problem::plain(crate::native_mods::cache_error(error)))
+/// Launcher-managed Start/Restart: the engine's command as the supervisor's own command
+/// description gives it, so that a server without its game files is refused before anything
+/// starts; then the supervisor.
+pub fn run_managed(
+    tag: &str,
+    dir: &Path,
+    args: &[&str],
+    line: &dyn Fn(String),
+) -> Result<(), Problem> {
+    let supervisor = command(tag, dir, args).map_err(Problem::plain)?;
+    horizon_server_launch::engine_command(Path::new(supervisor.get_program()), dir)
+        .map_err(|e| Problem::plain(e.to_string()))?;
+    stream(dir, supervisor, line)
 }
 
 fn stream(dir: &Path, mut command: Command, line: &dyn Fn(String)) -> Result<(), Problem> {
@@ -763,7 +274,12 @@ fn stream(dir: &Path, mut command: Command, line: &dyn Fn(String)) -> Result<(),
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| Problem::plain(format!("Couldn't run horizon-server: {e}")))?;
+        .map_err(|e| {
+            Problem::plain(crate::i18n::trf(
+                "Couldn't run horizon-server: {error}",
+                &[("error", &e.to_string())],
+            ))
+        })?;
     let (tx_err, rx_err) = std::sync::mpsc::channel();
     let mut err = child.stderr.take();
     std::thread::spawn(move || {
@@ -829,12 +345,8 @@ fn stream(dir: &Path, mut command: Command, line: &dyn Fn(String)) -> Result<(),
 /// What can be done about a problem, with one button.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Fix {
-    /// The port is taken: use this free one.
-    UsePort(u16),
-    /// The game files are missing: prepare them (Play page) and copy them for the servers.
-    Prepare,
-    /// The EULA isn't agreed to.
-    AgreeEula,
+    /// The port is taken: move the server to a free one of the club's `[hosting]` range.
+    PortTaken,
     /// The game's own log says more.
     ShowLog,
 }
@@ -872,35 +384,39 @@ impl Problem {
             "Only one usage of each socket address",
         ];
         if busy.iter().any(|b| both.contains(b)) {
-            let port = config(dir)
-                .and_then(|c| c["server"]["port"].as_u64())
-                .unwrap_or(25565) as u16;
+            let port = port_of(dir).unwrap_or(25565);
             return Self {
-                message: format!(
-                    "Port {port} is already used by another program (maybe another server). Use a free \
-                     port instead: friends then add it to the address."
-                ),
-                fix: Some(Fix::UsePort(free_port(port + 1, &[]))),
+                message: crate::i18n::trf(
+                    "Port {port} is already used by another program (maybe another server).",
+                    &[("port", &port.to_string())],
+                )
+                .to_owned(),
+                fix: Some(Fix::PortTaken),
             };
         }
         if has("no prepared game files") || has("not found next to the resources") {
             return Self {
-                message:
-                    "The server needs the game files from your own Minecraft. Prepare them: it \
-                          takes a few minutes, once."
-                        .into(),
-                fix: Some(Fix::Prepare),
+                message: crate::i18n::tr(
+                    "The server needs the game's files, which the club's supervisor prepares.",
+                )
+                .to_owned(),
+                fix: None,
             };
         }
         if has("EULA") && !has("eula=true") {
             return Self {
-                message: "Running a server needs your agreement to the Minecraft EULA.".into(),
-                fix: Some(Fix::AgreeEula),
+                message: crate::i18n::tr(
+                    "The club's supervisor has to accept Minecraft's EULA in club.toml before a \
+                     server can run.",
+                )
+                .to_owned(),
+                fix: None,
             };
         }
         if has("isn't up after") || has("the server stopped") {
             return Self {
-                message: "The game didn't start. Its log below says why.".into(),
+                message: crate::i18n::tr("The game didn't start. Its log below says why.")
+                    .to_owned(),
                 fix: Some(Fix::ShowLog),
             };
         }
@@ -916,7 +432,9 @@ impl Problem {
                     .find(|l| !l.trim().is_empty())
                     .map(str::to_string)
             })
-            .unwrap_or_else(|| "horizon-server failed without saying why".into());
+            .unwrap_or_else(|| {
+                crate::i18n::tr("horizon-server failed without saying why").to_string()
+            });
         Self::plain(capitalised(&said))
     }
 }
@@ -950,19 +468,14 @@ pub struct NewServer {
     pub max_players: u32,
     /// Only listed players (and operators) may join.
     pub friends_only: bool,
-    /// Check players' Minecraft accounts: they must sign in with Microsoft. On by default; an offline
-    /// server is a security risk, so it is turned off only per server (`--offline`, or the server's
-    /// settings page).
-    pub check_accounts: bool,
     /// Who may join first (whitelisted), and the first of them becomes an operator.
     pub players: Vec<String>,
-    pub eula: bool,
 }
 
 impl Default for NewServer {
     fn default() -> Self {
         Self {
-            name: "My server".into(),
+            name: crate::i18n::tr("My server").to_string(),
             world: World::New {
                 seed: String::new(),
             },
@@ -970,41 +483,38 @@ impl Default for NewServer {
             difficulty: "normal".into(),
             max_players: 10,
             friends_only: true,
-            check_accounts: true,
             players: Vec::new(),
-            eula: false,
         }
     }
 }
 
-/// A port nobody listens on, from `from` up, and not one of `taken`.
-pub fn free_port(from: u16, taken: &[u16]) -> u16 {
+/// A port nobody listens on among the club's `[hosting]` range, and not one of `taken`. None when
+/// the range holds no free port: no server is created then.
+pub fn free_port(first: u16, last: u16, taken: &[u16]) -> Option<u16> {
     let bind = if cfg!(test) || std::env::var_os("HORIZON_TEST_LOOPBACK").is_some_and(|v| v == "1")
     {
         "127.0.0.1"
     } else {
         "0.0.0.0"
     };
-    (from..u16::MAX)
-        .find(|p| !taken.contains(p) && std::net::TcpListener::bind((bind, *p)).is_ok())
-        .unwrap_or(from)
+    (first..=last).find(|p| !taken.contains(p) && std::net::TcpListener::bind((bind, *p)).is_ok())
 }
 
-/// The ports the launcher's other servers use: their game port and their web panel.
-fn ports_taken() -> Vec<u16> {
-    let mut out = Vec::new();
-    for e in list() {
-        if let Some(c) = config(&e.dir) {
-            out.extend(c["server"]["port"].as_u64().map(|p| p as u16));
-            out.extend(
-                c["panel"]["bind"]
-                    .as_str()
-                    .and_then(|b| b.rsplit_once(':'))
-                    .and_then(|(_, p)| p.parse::<u16>().ok()),
-            );
-        }
-    }
-    out
+/// The port a server's `server.toml` sets (`[server] port`), read from the file without asking
+/// `horizon-server`: the busy-port problem and the announcement both want it.
+pub fn port_of(dir: &Path) -> Option<u16> {
+    let text = fs::read_to_string(dir.join("server.toml")).ok()?;
+    let config: toml::Value = toml::from_str(&text).ok()?;
+    config
+        .get("server")?
+        .get("port")?
+        .as_integer()
+        .and_then(|p| u16::try_from(p).ok())
+}
+
+/// The ports the launcher's other servers use: their game port.
+pub fn ports_taken() -> Vec<u16> {
+    list().iter().filter_map(|e| port_of(&e.dir)).collect()
 }
 
 /// The player's worlds (the game home's `saves/`), newest first: their name and folder.
@@ -1029,12 +539,16 @@ pub fn player_worlds() -> Vec<(String, PathBuf)> {
     worlds.into_iter().map(|(_, n, p)| (n, p)).collect()
 }
 
-/// The `horizon-server init` arguments for a new server.
+/// The `horizon-server init` arguments for a new server: the EULA comes from the club's file
+/// (the supervisor accepted it there) and the server plays offline, as the edition has no
+/// accounts.
 pub fn init_args(spec: &NewServer, world: &str, port: u16) -> Vec<String> {
-    let mut args: Vec<String> = vec!["init".into(), "--yes".into()];
-    if spec.eula {
-        args.push("--eula".into());
-    }
+    let mut args: Vec<String> = vec![
+        "init".into(),
+        "--yes".into(),
+        "--eula".into(),
+        "--offline".into(),
+    ];
     args.extend(["--world".into(), world.to_string()]);
     if let World::New { seed } = &spec.world {
         if !seed.trim().is_empty() {
@@ -1047,9 +561,6 @@ pub fn init_args(spec: &NewServer, world: &str, port: u16) -> Vec<String> {
     } else {
         "--no-whitelist".into()
     });
-    if !spec.check_accounts {
-        args.push("--offline".into());
-    }
     for p in &spec.players {
         args.extend(["--player".into(), p.clone()]);
     }
@@ -1059,8 +570,14 @@ pub fn init_args(spec: &NewServer, world: &str, port: u16) -> Vec<String> {
     args
 }
 
-/// The `horizon-server config set` arguments that finish a new server.
-pub fn settings_args(spec: &NewServer, panel_port: u16) -> Vec<String> {
+/// Vanilla's `force-gamemode`, for every hosted server: each player is put in the server's mode
+/// when joining and when the mode changes, whatever an earlier visit saved for them. Without it
+/// `defaultgamemode` only reaches a player's first join.
+const FORCE_MODE: (&str, &str) = ("properties.force-gamemode", "true");
+
+/// The `horizon-server config set` arguments that finish a new server: its settings, offline
+/// mode, no web panel, and the build's prepared game files (`[engine] resources`).
+pub fn settings_args(spec: &NewServer, resources: &Path) -> Vec<String> {
     vec![
         "config".into(),
         "set".into(),
@@ -1068,37 +585,31 @@ pub fn settings_args(spec: &NewServer, panel_port: u16) -> Vec<String> {
         format!("world.difficulty={}", spec.difficulty),
         format!("server.max_players={}", spec.max_players.clamp(1, 1000)),
         format!("server.motd={}", spec.name.trim()),
-        format!("panel.bind=127.0.0.1:{panel_port}"),
+        "server.online_mode=false".into(),
+        "panel.bind=".into(),
+        format!("engine.resources={}", resources.display()),
+        format!("{}={}", FORCE_MODE.0, FORCE_MODE.1),
     ]
 }
 
-/// Creates a server: its folder, the world (a copy when asked), `init` and the settings, then adds it to
-/// the list. `tag` is the installed version whose programs and game files it uses when none are set up.
-pub fn create(spec: &NewServer, tag: Option<&str>, log: &dyn Fn(String)) -> Result<Entry, Problem> {
-    if !spec.eula {
-        return Err(Problem {
-            message: "Running a server needs your agreement to the Minecraft EULA.".into(),
-            fix: Some(Fix::AgreeEula),
-        });
+/// Creates a server: its folder, the world (a copy when asked), `init` and the settings, then
+/// adds it to the list. `tag` is the build in use, whose supervisor and game files it runs in
+/// place; `hosting` is the club's `[hosting]`: its EULA and its ports.
+pub fn create(
+    spec: &NewServer,
+    tag: &str,
+    hosting: &crate::config::Hosting,
+    log: &dyn Fn(String),
+) -> Result<Entry, Problem> {
+    if !hosting.eula_accepted {
+        return Err(Problem::plain(crate::i18n::tr(
+            "The club's supervisor has to accept Minecraft's EULA in club.toml before a server \
+             can be created.",
+        )));
     }
-    if program().is_none() || !game_files_ready() {
-        let tag = tag.ok_or_else(|| {
-            Problem::plain("Install a Horizon version first (Versions page), then prepare it.")
-        })?;
-        log(format!("Setting up the server programs from Horizon {tag}"));
-        set_up(tag).map_err(|e| {
-            if e.contains("prepared") {
-                Problem {
-                    message: e,
-                    fix: Some(Fix::Prepare),
-                }
-            } else {
-                Problem::plain(e)
-            }
-        })?;
-    }
+    can_host(tag).map_err(Problem::plain)?;
     let name = if spec.name.trim().is_empty() {
-        "My server".to_string()
+        crate::i18n::tr("My server").to_string()
     } else {
         spec.name.trim().to_string()
     };
@@ -1111,35 +622,51 @@ pub fn create(spec: &NewServer, tag: Option<&str>, log: &dyn Fn(String)) -> Resu
                 .file_name()
                 .map(|n| slug(&n.to_string_lossy()))
                 .unwrap_or_else(|| "world".into());
-            log(format!("Copying the world {}", from.display()));
+            log(crate::i18n::trf(
+                "Copying the world {name}…",
+                &[("name", &from.display().to_string())],
+            ));
             copy_world(from, &dir.join(&world)).map_err(|e| {
                 let _ = fs::remove_dir_all(&dir);
-                Problem::plain(format!("Couldn't copy the world: {e}"))
+                Problem::plain(crate::i18n::trf(
+                    "Couldn't copy the world: {error}",
+                    &[("error", &e.to_string())],
+                ))
             })?;
             world
         }
     };
-    let taken = ports_taken();
-    let port = free_port(25565, &taken);
-    let panel = free_port(8130, &taken);
+    let Some(port) = free_port(hosting.first_port, hosting.last_port, &ports_taken()) else {
+        let _ = fs::remove_dir_all(&dir);
+        return Err(Problem::plain(crate::i18n::trf(
+            "No port is free between {first} and {last}: stop another server, or ask the club's \
+             supervisor for more of them.",
+            &[
+                ("first", &hosting.first_port.to_string()),
+                ("last", &hosting.last_port.to_string()),
+            ],
+        )));
+    };
     let undo = |p: Problem| {
         let _ = fs::remove_dir_all(&dir);
         p
     };
     let init = init_args(spec, &world, port);
-    log("Writing the server's settings".into());
-    run(&dir, &init.iter().map(String::as_str).collect::<Vec<_>>()).map_err(undo)?;
-    let settings = settings_args(spec, panel);
+    log(crate::i18n::tr("Writing the server's settings…").to_string());
     run(
+        tag,
+        &dir,
+        &init.iter().map(String::as_str).collect::<Vec<_>>(),
+    )
+    .map_err(undo)?;
+    let settings = settings_args(spec, &backend::resources(tag));
+    run(
+        tag,
         &dir,
         &settings.iter().map(String::as_str).collect::<Vec<_>>(),
     )
     .map_err(undo)?;
-    let entry = Entry {
-        name,
-        dir,
-        host: None,
-    };
+    let entry = Entry { name, dir };
     add(entry.clone()).map_err(Problem::plain)?;
     Ok(entry)
 }
@@ -1165,13 +692,12 @@ fn copy_world(from: &Path, to: &Path) -> std::io::Result<()> {
 
 // ----- A server's files --------------------------------------------------------------------------
 
-/// The settings, as `horizon-server config --json` prints them (`None` before `init`, or from a
-/// `horizon-server` older than the command).
-pub fn config(dir: &Path) -> Option<Value> {
+/// The settings, as `horizon-server config --json` prints them (`None` before `init`).
+pub fn config(tag: &str, dir: &Path) -> Option<Value> {
     if !dir.join("server.toml").is_file() {
         return None;
     }
-    let out = run(dir, &["config", "--json"]).ok()?;
+    let out = run(tag, dir, &["config", "--json"]).ok()?;
     serde_json::from_str(out.trim()).ok()
 }
 
@@ -1188,13 +714,46 @@ pub struct Applied {
 
 /// Changes settings through `horizon-server config set` (checked there; nothing is written if one is
 /// wrong).
-pub fn set_config(dir: &Path, changes: &[(&str, String)]) -> Result<Applied, Problem> {
-    let pairs: Vec<String> = changes.iter().map(|(k, v)| format!("{k}={v}")).collect();
+pub fn set_config(tag: &str, dir: &Path, changes: &[(&str, String)]) -> Result<Applied, Problem> {
+    let mut pairs: Vec<String> = changes.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    // A server made before the rule had it gets it the first time its mode is changed here (and
+    // one edited by hand keeps it). It is the launcher's own doing: the page goes on telling
+    // only what the student changed.
+    let forced = changes.iter().any(|(k, _)| *k == "world.game_mode");
+    if forced {
+        pairs.push(format!("{}={}", FORCE_MODE.0, FORCE_MODE.1));
+    }
     let mut args = vec!["config", "set"];
     args.extend(pairs.iter().map(String::as_str));
     args.push("--json");
-    let out = run(dir, &args)?;
-    serde_json::from_str(out.trim()).map_err(|e| Problem::plain(e.to_string()))
+    let out = run(tag, dir, &args)?;
+    let mut applied: Applied =
+        serde_json::from_str(out.trim()).map_err(|e| Problem::plain(e.to_string()))?;
+    if forced {
+        let key = FORCE_MODE.0;
+        applied.applied.retain(|s| s != key);
+        applied.restart.retain(|s| s != key);
+    }
+    if let Some(line) = mode_command(changes, &applied) {
+        if let Some(api) = Api::open(dir) {
+            let _ = api.command(&line);
+        }
+    }
+    Ok(applied)
+}
+
+/// The console line that carries a new game mode to the players already on a running server:
+/// vanilla's `defaultgamemode` only reaches those who join later, and a club's "this server is
+/// creative" means everyone on it. `None` when the server is stopped or its mode did not change.
+fn mode_command(changes: &[(&str, String)], applied: &Applied) -> Option<String> {
+    if !applied.running || !applied.applied.iter().any(|s| s == "world.game_mode") {
+        return None;
+    }
+    changes
+        .iter()
+        .rev()
+        .find(|(k, _)| *k == "world.game_mode")
+        .map(|(_, mode)| format!("gamemode {mode} @a"))
 }
 
 /// A list file's names (`whitelist.json`, `ops.json`, `banned-players.json`), as vanilla writes them.
@@ -1231,8 +790,8 @@ pub struct Backup {
     pub modified: Option<u64>,
 }
 
-pub fn backups(dir: &Path) -> Result<Vec<Backup>, Problem> {
-    let out = run(dir, &["backups", "--json"])?;
+pub fn backups(tag: &str, dir: &Path) -> Result<Vec<Backup>, Problem> {
+    let out = run(tag, dir, &["backups", "--json"])?;
     serde_json::from_str(out.trim()).map_err(|e| Problem::plain(e.to_string()))
 }
 
@@ -1243,52 +802,6 @@ pub fn lan_address() -> Option<std::net::IpAddr> {
     socket.connect("192.0.2.1:9").ok()?;
     let ip = socket.local_addr().ok()?.ip();
     (!ip.is_unspecified() && !ip.is_loopback()).then_some(ip)
-}
-
-/// Whether the server starts at login: the service definition `horizon-server service print` names exists.
-pub fn service_installed(dir: &Path) -> bool {
-    if cfg!(windows) {
-        let name = format!("horizon-server-{}", service_suffix(dir));
-        return crate::process::command("schtasks")
-            .args(["/Query", "/TN", &name])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success());
-    }
-    run(dir, &["service", "print"])
-        .ok()
-        .and_then(|out| {
-            out.lines()
-                .next()
-                .and_then(|l| l.strip_prefix("# "))
-                .map(PathBuf::from)
-        })
-        .is_some_and(|p| p.is_file())
-}
-
-/// horizon-server's service name for a folder, after `horizon-server-`.
-fn service_suffix(dir: &Path) -> String {
-    let folder = dir
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let clean: String = folder
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    let clean = clean.trim_matches('-');
-    if clean.is_empty() {
-        "server".into()
-    } else {
-        clean.into()
-    }
 }
 
 // ----- The running server: its control API -------------------------------------------------------
@@ -1366,15 +879,6 @@ impl Api {
             .filter_map(|l| l.as_str().map(str::to_string))
             .collect())
     }
-
-    /// A one-time login link for the web panel.
-    pub fn panel_link(&self) -> Result<String, String> {
-        let v = self.call("POST", "/api/v1/panel/login", None)?;
-        v["url"]
-            .as_str()
-            .map(str::to_string)
-            .ok_or_else(|| "the panel gave no link".into())
-    }
 }
 
 /// A player online.
@@ -1401,13 +905,6 @@ pub struct Status {
     pub cpu_percent: Option<f64>,
     /// Paused because nobody is online (vanilla's pause-when-empty).
     pub paused: bool,
-    /// The release in use and a newer one, when the supervisor found one.
-    pub release: Option<String>,
-    pub update_available: Option<String>,
-    /// An update under way: what it is doing now.
-    pub update_busy: Option<String>,
-    /// How the last update went (its message, and whether it worked).
-    pub update_last: Option<(String, bool)>,
 }
 
 impl Status {
@@ -1420,7 +917,6 @@ impl Status {
 
     pub fn parse(v: &Value) -> Self {
         let game = &v["sample"]["game"];
-        let update = &v["update"];
         Self {
             phase: v["phase"].as_str().unwrap_or("stopped").to_string(),
             uptime: v["engine_uptime_seconds"].as_u64(),
@@ -1442,12 +938,6 @@ impl Status {
             ram_bytes: v["sample"]["rss_bytes"].as_u64(),
             cpu_percent: v["sample"]["cpu_percent"].as_f64(),
             paused: game["paused"] == true,
-            release: update["installed"].as_str().map(str::to_string),
-            update_available: update["available"].as_str().map(str::to_string),
-            update_busy: update["busy"].as_str().map(str::to_string),
-            update_last: update["last"]
-                .as_str()
-                .map(|m| (m.to_string(), update["ok"] != false)),
         }
     }
 

@@ -21,9 +21,10 @@ pub fn draws_brand(window: &Window) -> bool {
     }
 }
 
-pub fn options() -> TitlebarOptions {
+/// The window's native title: the club's name (`club.toml`), as the system's taskbar shows it.
+pub fn options(title: &str) -> TitlebarOptions {
     TitlebarOptions {
-        title: Some("Horizon Launcher".into()),
+        title: Some(title.to_owned().into()),
         // macOS and Windows place the GPUI content under the native title bar. Linux uses
         // client-side decorations below, so its title bar is transparent by construction.
         appears_transparent: cfg!(any(target_os = "macos", target_os = "windows")),
@@ -35,7 +36,7 @@ pub fn options() -> TitlebarOptions {
 /// it. The native title bar is transparent either way, so the bar is always drawn: without it the
 /// page would start under the traffic lights. AppKit keeps its controls and window interactions.
 #[cfg(target_os = "macos")]
-pub fn render(theme: &Theme, _window: &Window) -> Option<Div> {
+pub fn render(theme: &Theme, _title: &str, _window: &Window) -> Option<Div> {
     use crate::glass::{self, Kind};
     use gpui::{div, prelude::*, px};
 
@@ -57,13 +58,13 @@ pub fn render(theme: &Theme, _window: &Window) -> Option<Div> {
     not(target_os = "linux"),
     not(target_os = "macos")
 ))]
-pub fn render(_theme: &Theme, _window: &Window) -> Option<Div> {
+pub fn render(_theme: &Theme, _title: &str, _window: &Window) -> Option<Div> {
     None
 }
 
 /// Draw the launcher's Linux title bar when the platform uses client-side decorations.
 #[cfg(target_os = "linux")]
-pub fn render(theme: &Theme, window: &Window) -> Option<Div> {
+pub fn render(theme: &Theme, title: &str, window: &Window) -> Option<Div> {
     use crate::glass::{self, Kind};
     use crate::{blocks, mark};
     use gpui::{div, prelude::*, px, Decorations, FontWeight, MouseButton};
@@ -83,9 +84,12 @@ pub fn render(theme: &Theme, window: &Window) -> Option<Div> {
         .px(px(12.))
         .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
         .child(mark(16., theme))
+        // The club's name, as long as the supervisor wrote it: it yields to the window's buttons.
         .child(
             blocks::pixel(13., FontWeight::MEDIUM)
-                .child(horizon_launcher::i18n::tr("Horizon Launcher")),
+                .min_w_0()
+                .truncate()
+                .child(title.to_owned()),
         );
 
     let mut bar = div()
@@ -451,7 +455,7 @@ mod windows {
         crate::track_hover(el, id)
     }
 
-    pub fn render(theme: &Theme, window: &Window) -> Option<Div> {
+    pub fn render(theme: &Theme, title: &str, window: &Window) -> Option<Div> {
         let drag = div()
             .id("window-drag")
             .flex()
@@ -462,9 +466,12 @@ mod windows {
             .px(px(12.))
             .window_control_area(WindowControlArea::Drag)
             .child(mark(16., theme))
+            // The club's name, as long as the supervisor wrote it: it yields to the buttons.
             .child(
                 blocks::pixel(13., FontWeight::MEDIUM)
-                    .child(horizon_launcher::i18n::tr("Horizon Launcher")),
+                    .min_w_0()
+                    .truncate()
+                    .child(title.to_owned()),
             );
         Some(
             div()

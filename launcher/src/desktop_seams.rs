@@ -7,8 +7,7 @@
 //!   (text as UTF-8, a picture as its PNG or JPEG bytes).
 //!
 //! Test runs point both into their scratch folders, beside `HORIZON_HOME` and
-//! `HORIZON_LAUNCHER_HOME`, and `HORIZON_LAUNCHER_DESKTOP` too (`shortcut`: where desktop
-//! shortcuts go).
+//! `HORIZON_LAUNCHER_HOME`.
 use std::path::{Path, PathBuf};
 
 pub const TRASH_ENV: &str = "HORIZON_LAUNCHER_TRASH";

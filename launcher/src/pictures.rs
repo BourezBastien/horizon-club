@@ -1,7 +1,7 @@
-//! Pictures the launcher draws from the player's disk (screenshots, Home's background), made no
+//! Pictures the launcher draws from the player's disk (Home's background), made no
 //! bigger than they are drawn, and the byte-capped cache that keeps them.
 //!
-//! Screenshots can be huge: a high-resolution capture of 32768 × 16384 is 2 GiB once decoded.
+//! A picture can be huge: a 32768 × 16384 one is 2 GiB once decoded.
 //! A PNG is therefore read one row at a time and averaged down as the rows come, so the whole
 //! picture is never in memory; other formats are decoded whole only under [`WHOLE_DECODE_MAX`].
 //!

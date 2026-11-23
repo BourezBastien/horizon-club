@@ -1,5 +1,5 @@
 //! The launcher's frame in the night look (docs/design-system.md, "Night"): the sidebar's plate
-//! and rows, and the top bar's tabs, icon buttons and account chip. The sky shows between them;
+//! and rows, and the top bar's tabs, icon buttons and player chip. The sky shows between them;
 //! only the sidebar and the selected or hovered parts are plates.
 use crate::plate::{alpha, cut};
 use crate::theme::{self, night, Step, Theme};
@@ -69,7 +69,7 @@ fn hovered(id: &SharedString, steps: usize, t: &Theme) -> gpui::AnyElement {
     hover_fade(id, layer, |d, a| d.opacity(a))
 }
 
-/// A sidebar row (an instance, a server): its picture and two lines go in as children. The
+/// A sidebar row (the game, a server): its picture and two lines go in as children. The
 /// selected one sits on a plate cut in two steps; the others get one while hovered.
 pub fn row(id: impl Into<SharedString>, selected_now: bool, t: &Theme) -> Stateful<Div> {
     let id = id.into();
@@ -116,8 +116,7 @@ pub fn row_text(name: impl Into<SharedString>, sub: String, state: Option<Hsla>,
         )
 }
 
-/// A heading over a group of rows ("Instances", a group's name, "Servers"), with room for a
-/// button on its right.
+/// A heading over a group of rows ("Servers"), with room for a button on its right.
 pub fn heading(label: impl Into<SharedString>, t: &Theme) -> Div {
     div()
         .flex()
@@ -200,7 +199,7 @@ pub fn icon_button(
     )
 }
 
-/// The account chip's plate: `card` cut in one step with its stroke, for the picture and two
+/// The player chip's plate: `card` cut in one step with its stroke, for the picture and two
 /// lines that go in as children.
 pub fn chip(id: impl Into<SharedString>, t: &Theme) -> Stateful<Div> {
     let id = id.into();
@@ -232,12 +231,11 @@ pub fn chip(id: impl Into<SharedString>, t: &Theme) -> Stateful<Div> {
     keyboard(track_hover(d, id), t)
 }
 
-/// What a night button is: the one main action (accent, cut in one step), a raised one
-/// (`card_hi`), or only its label until the pointer is over it.
+/// What a night button is: the one main action (accent, cut in one step), or only its label
+/// until the pointer is over it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     Main,
-    Raised,
     Quiet,
 }
 
@@ -287,16 +285,6 @@ pub fn action(id: impl Into<SharedString>, kind: Action, t: &Theme) -> Stateful<
                 },
                 |d, a| d.opacity(a),
             )),
-        Action::Raised => d
-            .h(px(theme::CONTROL))
-            .rounded(px(night::RADIUS_CONTROL))
-            .bg(alpha(n.card_hi, n.card_hi_alpha))
-            .border_1()
-            .border_color(alpha(n.stroke, n.stroke_alpha))
-            .text_color(c(n.ink))
-            .child(hover_fade(&id, round, move |d, a| {
-                d.bg(alpha(n.ink, 0.06 * a))
-            })),
         Action::Quiet => d
             .h(px(theme::CONTROL))
             .rounded(px(night::RADIUS_CONTROL))

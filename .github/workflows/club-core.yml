@@ -1,0 +1,85 @@
+name: club core
+# Builds the school edition's game for Windows x64: the game without Horizon's extras and with the
+# `managed` feature, the server and its supervisor, and the preparer, in the folder a club's share
+# holds as core\<build> (docs/school-edition/README.md, "Un cœur de jeu"). The launcher, the
+# bootstrap and the tools are the fork's own: nothing here builds them, and nothing is downloaded
+# from Mojang: the game's files are prepared on the supervisor's computer.
+on:
+  workflow_dispatch:
+  push:
+    branches: [club]
+    paths:
+      - crates/**
+      - mods/horizon/src/test/java/**
+      - Cargo.toml
+      - Cargo.lock
+      - research-lock.json
+      - tools/ci/fetch_dxc.py
+      - packaging/windows/DXC-NOTICE.txt
+      - .github/workflows/club-core.yml
+
+permissions: contents: read
+
+concurrency:
+  group: club-core-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core:
+    name: game build for Windows x64
+    runs-on: windows-latest
+    # The hosted Windows release build takes 35 to 80 minutes (game-build.yml's notes).
+    timeout-minutes: 150
+    env:
+      BIN: target/release
+      # What the game says of itself (--version, its crash reports).
+      HORIZON_VERSION: club-${{ github.run_number }}
+      # The C runtime inside the programs: a school's computer may have no Visual C++
+      # Redistributable, and a program that needs VCRUNTIME140.dll does not start without it.
+      # Horizon's own Windows releases set the same flag (game-build.yml).
+      RUSTFLAGS: -C target-feature=+crt-static
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: rust
+        run: echo "version=$(cat tools/ci/rust-version)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable, 2026-11
+        with:
+          toolchain: ${{ steps.rust.outputs.version }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: club-core-windows
+      - name: Build the game, without Horizon's extras and with the club's rule
+        run: >
+          cargo build --release --locked -p horizon-game --bin horizon-client
+          --no-default-features --features audio,controllers,managed
+      - name: Build the preparer, the server and its supervisor
+        run: cargo build --release --locked -p horizon-prepare --bin horizon-prepare -p horizon-server --bin horizon-server
+      - name: Every program the build folder takes was built
+        run: |
+          for binary in horizon-client horizon-prepare horizon-server; do
+            test -f "$BIN/$binary.exe" || { echo "::error::$BIN/$binary.exe is missing"; exit 1; }
+          done
+      - name: The build folder
+        # The build's name says which run and which commit made it: the supervisor renames the
+        # folder to what club.toml's [versions] active names, or writes that name there.
+        run: |
+          tag="club-${GITHUB_RUN_NUMBER}-${GITHUB_SHA::7}"
+          out="dist/core/$tag"
+          mkdir -p "$out"
+          cp "$BIN/horizon-client.exe" "$BIN/horizon-prepare.exe" "$BIN/horizon-server.exe" "$out/"
+          cp research-lock.json LICENSE "$out/"
+          cp -R LICENSES "$out/"
+          # DirectX 12 compiles its shaders with DXC on integrated GPUs, those of the club's small
+          # computers (gfx/dx12_compiler.rs): the DLL and its licences, pinned and checksummed.
+          python tools/ci/fetch_dxc.py "$out"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: club-core-windows-x64
+          path: dist/core
+          retention-days: 14

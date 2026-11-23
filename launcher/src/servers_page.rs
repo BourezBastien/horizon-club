@@ -1,12 +1,17 @@
-//! The Servers page: create a server in one dialog, then start, stop and watch it, give friends its
-//! address, manage who may join, change its settings, back it up and update it, all with buttons. Every
-//! action runs `horizon-server` or calls the running server's control API (`horizon_launcher::servers`).
+//! The Servers page (docs/school-edition/launcher-target.md, section 7): create a server in one
+//! dialog, then start, stop and watch it, manage who may join, change its settings and back it
+//! up, all with buttons. Every action runs `horizon-server` of the build in use, in place from
+//! the club's share, or calls the running server's control API
+//! (`horizon_launcher::servers`). While a server this launcher started runs, it is announced in
+//! the club's `online\` folder every ten seconds (`online.rs`), so the other students' launchers
+//! list it in their Multiplayer tab.
 use super::line_edit::{self, Key, LineEdit};
 use super::*;
 use horizon_launcher::heads;
 use horizon_launcher::servers::{
     self, Applied, Backup, Entry, Fix, NewServer, Problem, Status, World,
 };
+use horizon_launcher::{club, online, server_list};
 use horizon_theme::glass::radius;
 use serde_json::Value;
 use std::collections::{BTreeSet, HashMap};
@@ -21,25 +26,21 @@ use glass_servers::glass_setting_row;
 mod servers_format;
 use servers_format::{backup_label, bytes, uptime};
 
-/// One consent boundary for every launcher-managed start/restart route.
-fn run_managed_server(
-    tx: &std::sync::mpsc::Sender<backend::Msg>,
-    dir: &Path,
-    args: &[&str],
-    log: &dyn Fn(String),
-) -> Result<(), Problem> {
-    crate::jar_launch::with_consent(tx, |permission| {
-        servers::run_managed(dir, args, log, permission)
-    })
-}
-
-/// The servers this launcher started in this session, stopped when it closes unless they run as a
-/// service (`stop_on_quit`).
+/// The servers this launcher started in this session, stopped when it closes: a hosted server
+/// lives as long as its launcher window (`stop_on_quit`).
 static STARTED_HERE: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+/// Whether the `online\` folder's refusal has been said in the launcher's own log: once is
+/// enough, the folder is the supervisor's, not the student's, to fix.
+static ANNOUNCE_QUIET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// How often the open server's status and log are read, and the list's.
 const POLL_OPEN: Duration = Duration::from_millis(1000);
 const POLL_LIST: Duration = Duration::from_secs(3);
+
+/// How often the announcement of a running hosted server is written again: three times over
+/// before [`online::FRESH`] passes.
+const ANNOUNCE: Duration = Duration::from_secs(10);
 
 /// Lines of the server's log kept on the page.
 const CONSOLE_KEEP: usize = 1000;
@@ -52,39 +53,11 @@ pub(super) enum Field {
     Command,
     AddPlayer,
     Motd,
-    Port,
-    Token,
-    Email,
-    /// The instance dialog's (`instances_page.rs`).
-    InstanceName,
-    InstanceGroup,
-    /// Its search in Mojang's versions (`new_instance.rs`).
-    InstanceVersion,
-    /// Home's Mods tab's filter (`instance_mods.rs`).
-    InstanceModsFilter,
-    /// Home's Multiplayer section's (`multiplayer_page.rs`).
-    ServerName,
-    ServerAddress,
     /// Home's Console's search (`console_page.rs`).
     ConsoleSearch,
-    /// The Launch panel's (`launch_page.rs`).
-    PreLaunch,
-    Wrapper,
-    LaunchEnv,
-    PostExit,
-    /// Home's memory row (`launch_page.rs`).
-    MemoryLimit,
     DeleteServer,
     /// Settings' accent as hex (`themes_page.rs`).
     AccentHex,
-    /// The Shop's gift recipient (`wardrobe_page/shop/basket.rs`).
-    ShopGift,
-    /// The Wardrobe's search through what the player owns (`wardrobe_page.rs`).
-    WardrobeSearch,
-    /// A Java instance's own JVM arguments and window size (the instance sheet's Launch).
-    JavaArgs,
-    WindowWidth,
-    WindowHeight,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -134,11 +107,9 @@ pub(super) enum Event {
         dir: PathBuf,
         config: Option<Value>,
         backups: Vec<Backup>,
-        service: bool,
     },
     Applied(Result<Applied, Problem>),
     Pvp(Option<bool>),
-    UpdateCheck(Result<Value, Problem>),
     Failed(String),
 }
 
@@ -153,11 +124,6 @@ pub(super) struct Create {
     mode: &'static str,
     difficulty: &'static str,
     max_players: u32,
-    friends_only: bool,
-    check_accounts: bool,
-    eula: bool,
-    /// Create was pressed without the EULA ticked.
-    eula_missing: bool,
     /// The glass dialog's friends let in, the first an operator (the light one types them in
     /// `Field::Players`).
     friends: Vec<String>,
@@ -166,17 +132,6 @@ pub(super) struct Create {
 /// What the sidebar shows of the Servers page: its list once the page has read it, and whether
 /// a server answers.
 impl Servers {
-    pub(super) fn location_busy(&self) -> bool {
-        self.busy.is_some()
-            || self.creating
-            || self.applying
-            || !self.queued.is_empty()
-            || self
-                .statuses
-                .values()
-                .any(|s| matches!(s.phase.as_str(), "running" | "starting" | "stopping"))
-    }
-
     /// A stopped server's line in the list: "Survival · stopped", as the mockup's. The open
     /// server's mode is the one its settings show now, once read; the others' (and the open one's
     /// until then) come from their files.
@@ -241,10 +196,6 @@ pub(super) struct Servers {
     backups: Vec<Backup>,
     confirm_restore: Option<String>,
     confirm_delete: bool,
-    service: Option<bool>,
-    update: Option<Value>,
-    /// `update --check` is under way.
-    checking: bool,
     pvp: Option<bool>,
     texts: HashMap<Field, LineEdit>,
     focus: HashMap<Field, FocusHandle>,
@@ -257,6 +208,8 @@ pub(super) struct Servers {
     invalid: Option<(Field, &'static str)>,
     copied: Option<Instant>,
     faces: HashMap<String, Option<Vec<[u8; 4]>>>,
+    /// When the running hosted server's announcement was last written, while one runs.
+    announced: Option<Instant>,
     tx: Sender<Event>,
     rx: Receiver<Event>,
 }
@@ -291,9 +244,6 @@ impl Servers {
             backups: Vec::new(),
             confirm_restore: None,
             confirm_delete: false,
-            service: None,
-            update: None,
-            checking: false,
             pvp: None,
             texts: HashMap::new(),
             focus: HashMap::new(),
@@ -303,6 +253,7 @@ impl Servers {
             invalid: None,
             copied: None,
             faces: HashMap::new(),
+            announced: None,
             tx,
             rx,
         }
@@ -314,15 +265,6 @@ impl Servers {
 
     pub(super) fn value(&self, f: Field) -> &str {
         self.texts.get(&f).map_or("", LineEdit::text)
-    }
-
-    /// Mark a field invalid without an explanatory message, or clear its previous error.
-    pub(super) fn set_field_invalid(&mut self, field: Field, invalid: bool) {
-        if invalid {
-            self.invalid = Some((field, ""));
-        } else if self.invalid.is_some_and(|(current, _)| current == field) {
-            self.invalid = None;
-        }
     }
 
     /// Whether this field has the keyboard, as of this frame.
@@ -374,28 +316,22 @@ impl Servers {
     }
 }
 
-/// Stops the servers this launcher started, unless they run in the background as a service.
+/// Stops the servers this launcher started and takes their announcement away: in this edition a
+/// hosted server lives as long as its launcher window.
 pub(super) fn stop_on_quit() {
     for dir in STARTED_HERE.lock().unwrap().drain(..) {
-        if servers::service_installed(&dir) {
-            continue;
-        }
         if let Some(api) = servers::Api::open(&dir) {
             let _ = api.call("POST", "/api/v1/stop", None);
         }
     }
+    if let Err(e) = online::remove(&club::online_dir()) {
+        eprintln!("Horizon launcher: could not remove the announcement: {e}");
+    }
 }
 
-/// Update closes the window to open the new launcher at once: a server is its own process and the
-/// new window finds it running, so an update doesn't end anyone's game. It stays up when that new
-/// window closes too, until it is stopped on the Servers page.
-pub(super) fn keep_running_through_update() {
-    STARTED_HERE.lock().unwrap().clear();
-}
-
-/// The player's own name, to let them in on a friends-only server: the Microsoft account that plays.
-fn own_name(accounts: &Accounts) -> Option<String> {
-    accounts.selected().map(|a| a.name.clone())
+/// The player's own name, to let them in on a friends-only server: the Windows session's.
+fn own_name(player: &Option<String>) -> Option<String> {
+    player.clone()
 }
 
 impl Launcher {
@@ -434,12 +370,14 @@ impl Launcher {
         });
     }
 
-    /// `horizon-server <args>` on the open server, as a job.
+    /// `horizon-server <args>` on the open server, as a job, from the build in use.
     fn server_command(&mut self, label: &str, args: Vec<String>) {
         let Some(dir) = self.servers.open.clone() else {
             return;
         };
-        let tx = self.tx.clone();
+        let Some(tag) = self.selected().map(str::to_owned) else {
+            return;
+        };
         self.server_job(label.to_string(), move |log| {
             let args: Vec<&str> = args.iter().map(String::as_str).collect();
             let result = match args.first().copied() {
@@ -447,29 +385,30 @@ impl Launcher {
                     if args[0] == "start" {
                         log(tr("A new world takes a minute the first time").into());
                     }
-                    run_managed_server(&tx, &dir, &args, log)
+                    servers::run_managed(&tag, &dir, &args, log)
                 }
-                _ => servers::run_streamed(&dir, &args, log),
+                _ => servers::run_streamed(&tag, &dir, &args, log),
             };
             result.map(|_| String::new())
         });
     }
 
-    /// Reads the open server's settings, backups and service state again.
+    /// Reads the open server's settings and backups again.
     fn load_details(&self) {
         let Some(dir) = self.servers.open.clone() else {
             return;
         };
+        let Some(tag) = self.selected().map(str::to_owned) else {
+            return;
+        };
         let tx = self.servers.tx.clone();
         std::thread::spawn(move || {
-            let config = servers::config(&dir);
-            let backups = servers::backups(&dir).unwrap_or_default();
-            let service = servers::service_installed(&dir);
+            let config = servers::config(&tag, &dir);
+            let backups = servers::backups(&tag, &dir).unwrap_or_default();
             let _ = tx.send(Event::Details {
                 dir,
                 config,
                 backups,
-                service,
             });
         });
     }
@@ -485,8 +424,6 @@ impl Launcher {
         s.tab = Tab::Overview;
         s.config = None;
         s.backups.clear();
-        s.service = None;
-        s.update = None;
         s.pvp = None;
         s.problem = None;
         s.note = None;
@@ -495,22 +432,19 @@ impl Launcher {
         s.texts.remove(&Field::DeleteServer);
         s.restart_needed.clear();
         s.texts.remove(&Field::Motd);
-        s.texts.remove(&Field::Port);
         s.invalid = None;
         s.polled = None;
         self.load_details();
     }
 
-    /// Called with the launcher's other work: what the background sent, and the next status poll.
+    /// Called with the launcher's other work: what the background sent, the announcement of a
+    /// running hosted server, and the next status poll.
     pub(super) fn servers_tick(&mut self) -> bool {
-        // The glass page shows how friends reach the server beside it, whatever the tab.
-        let overview = self.page == Page::Servers
-            && self.servers.open.is_some()
-            && (self.servers.tab == Tab::Overview || self.theme.glass);
-        let mut changed = self.internet_tick(overview);
+        let mut changed = false;
         while let Ok(event) = self.servers.rx.try_recv() {
             changed |= self.servers_event(event);
         }
+        self.announce();
         if self.page != Page::Servers || self.servers.polling || !self.servers.loaded {
             return changed;
         }
@@ -532,6 +466,15 @@ impl Launcher {
                 } else {
                     0
                 };
+                // The other servers this launcher started keep running while one is open: their
+                // status is read in the same poll, so the announcement follows them honestly.
+                let others: Vec<PathBuf> = STARTED_HERE
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|d| **d != dir)
+                    .cloned()
+                    .collect();
                 std::thread::spawn(move || {
                     let api = servers::Api::open(&dir);
                     let status = api
@@ -544,6 +487,14 @@ impl Launcher {
                         status: Box::new(status),
                         logs,
                     });
+                    for d in others {
+                        let status = servers::status(&d);
+                        let _ = tx.send(Event::Polled {
+                            dir: d,
+                            status: Box::new(status),
+                            logs: None,
+                        });
+                    }
                 });
             }
             None => {
@@ -561,6 +512,82 @@ impl Launcher {
             }
         }
         changed
+    }
+
+    /// Writes the announcement of the first server this launcher started that runs, again every
+    /// [`ANNOUNCE`] seconds, and takes it away once none does. The `online\` folder is the
+    /// supervisor's to make: a student who cannot write there is not hosting for the club, said
+    /// once in the launcher's own log and never in the window.
+    fn announce(&mut self) {
+        let running = STARTED_HERE
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|d| {
+                self.servers
+                    .statuses
+                    .get(d.as_path())
+                    .is_some_and(|s| s.phase == "running")
+            })
+            .cloned();
+        match running {
+            Some(dir)
+                if self
+                    .servers
+                    .announced
+                    .is_none_or(|at| at.elapsed() >= ANNOUNCE) =>
+            {
+                self.servers.announced = Some(Instant::now());
+                let Some(owner) = self.player.clone() else {
+                    return;
+                };
+                let Some(name) = self
+                    .servers
+                    .list
+                    .iter()
+                    .find(|e| e.dir == dir)
+                    .map(|e| e.name.clone())
+                else {
+                    return;
+                };
+                std::thread::spawn(move || {
+                    let (Some(port), Some(address)) =
+                        (servers::port_of(&dir), servers::lan_address())
+                    else {
+                        return;
+                    };
+                    let announcement = online::Announcement {
+                        name,
+                        owner,
+                        host: address.to_string(),
+                        port,
+                        at: server_list::now(),
+                    };
+                    if online::write(&club::online_dir(), &announcement).is_err()
+                        && !ANNOUNCE_QUIET.load(std::sync::atomic::Ordering::Relaxed)
+                    {
+                        ANNOUNCE_QUIET.store(true, std::sync::atomic::Ordering::Relaxed);
+                        eprintln!(
+                            "{}",
+                            tr(
+                                "This launcher cannot write in the club's online folder, so other \
+                                 students won't see the hosted server in their list.",
+                            )
+                        );
+                    }
+                });
+            }
+            Some(_) => {}
+            None if self.servers.announced.is_some() => {
+                self.servers.announced = None;
+                std::thread::spawn(move || {
+                    if let Err(e) = online::remove(&club::online_dir()) {
+                        eprintln!("Horizon launcher: could not remove the announcement: {e}");
+                    }
+                });
+            }
+            None => {}
+        }
     }
 
     fn servers_event(&mut self, event: Event) -> bool {
@@ -639,11 +666,11 @@ impl Launcher {
                         s.create = None;
                         s.list = servers::list();
                         s.modes.clear();
-                        s.modes.clear();
                         self.open_server(entry.dir.clone());
-                        self.servers.note = Some(format!(
-                            "{} is ready. Press Start, then give your friends the address below.",
-                            entry.name
+                        self.servers.note = Some(trf(
+                            "{name} is ready. Press Start, and the other students see it in \
+                             their Multiplayer tab.",
+                            &[("name", &entry.name)],
                         ));
                     }
                     Err(p) => s.problem = Some(p),
@@ -654,12 +681,10 @@ impl Launcher {
                 dir,
                 config,
                 backups,
-                service,
             } => {
                 if s.open.as_ref() == Some(&dir) {
                     s.config = config;
                     s.backups = backups;
-                    s.service = Some(service);
                     true
                 } else {
                     false
@@ -680,7 +705,7 @@ impl Launcher {
                     self.side_servers = s.list.clone();
                 }
                 match result {
-                    Ok(()) => s.note = Some("Server moved to the trash.".into()),
+                    Ok(()) => s.note = Some(tr("Server moved to the trash.").into()),
                     Err(e) => s.problem = Some(Problem::plain(e)),
                 }
                 true
@@ -701,14 +726,6 @@ impl Launcher {
             }
             Event::Pvp(on) => {
                 s.pvp = on;
-                true
-            }
-            Event::UpdateCheck(result) => {
-                s.checking = false;
-                match result {
-                    Ok(v) => s.update = Some(v),
-                    Err(p) => s.problem = Some(p),
-                }
                 true
             }
             Event::Failed(e) => {
@@ -775,10 +792,13 @@ impl Launcher {
             }
         }
         let tx = self.servers.tx.clone();
+        let Some(tag) = self.selected().map(str::to_owned) else {
+            return;
+        };
         std::thread::spawn(move || {
             let pairs: Vec<(&str, String)> =
                 batch.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
-            let _ = tx.send(Event::Applied(servers::set_config(&dir, &pairs)));
+            let _ = tx.send(Event::Applied(servers::set_config(&tag, &dir, &pairs)));
         });
     }
 
@@ -804,9 +824,11 @@ impl Launcher {
         let Some(dir) = self.servers.open.clone() else {
             return;
         };
+        let Some(tag) = self.selected().map(str::to_owned) else {
+            return;
+        };
         STARTED_HERE.lock().unwrap().push(dir.clone());
         self.servers.restart_needed.clear();
-        let tx = self.tx.clone();
         self.server_job("Starting", move |log| {
             if let Some(api) = servers::Api::open(&dir) {
                 if let Ok(status) = api.call("GET", "/api/v1/status", None) {
@@ -818,12 +840,15 @@ impl Launcher {
                 }
             }
             log("A new world takes a minute the first time".into());
-            run_managed_server(&tx, &dir, &["start"], log).map(|_| String::new())
+            servers::run_managed(&tag, &dir, &["start"], log).map(|_| String::new())
         });
     }
 
     fn stop_server(&mut self) {
         let Some(dir) = self.servers.open.clone() else {
+            return;
+        };
+        let Some(tag) = self.selected().map(str::to_owned) else {
             return;
         };
         self.server_job("Stopping", move |log| {
@@ -834,7 +859,7 @@ impl Launcher {
             if via_api {
                 return Ok(String::new());
             }
-            servers::run_streamed(&dir, &["stop"], log).map(|_| String::new())
+            servers::run_streamed(&tag, &dir, &["stop"], log).map(|_| String::new())
         });
     }
 
@@ -842,7 +867,9 @@ impl Launcher {
         let Some(dir) = self.servers.open.clone() else {
             return;
         };
-        let tx = self.tx.clone();
+        let Some(tag) = self.selected().map(str::to_owned) else {
+            return;
+        };
         self.server_job("Restarting", move |log| {
             // The running server's API first; when it can't be reached or refuses, the CLI,
             // whose error is the job's.
@@ -851,44 +878,37 @@ impl Launcher {
             if via_api {
                 return Ok(String::new());
             }
-            run_managed_server(&tx, &dir, &["restart"], log).map(|_| String::new())
+            servers::run_managed(&tag, &dir, &["restart"], log).map(|_| String::new())
         });
     }
 
     fn fix(&mut self, fix: Fix, cx: &mut Context<Self>) {
         self.servers.problem = None;
         match fix {
-            Fix::UsePort(port) => {
-                self.set_setting("server.port", port.to_string());
-                self.servers.texts.remove(&Field::Port);
-                self.servers.note = Some(format!(
-                    "The server now uses port {port}. Press Start again."
-                ));
-            }
-            Fix::Prepare => match self.selected().cloned() {
-                Some(tag) if backend::is_prepared(&tag) => {
-                    self.server_job("Copying the game files", move |log| {
-                        log(format!("Copying the game files prepared for Horizon {tag}"));
-                        servers::set_up(&tag)
-                            .map(|_| "The game files are ready. Press Start again.".to_string())
-                            .map_err(Problem::plain)
-                    });
-                }
-                _ => {
-                    self.servers.create = None;
-                    self.go(Page::Play);
-                    if !self.preparing {
-                        self.prepare(backend::MinecraftFrom::Install);
+            Fix::PortTaken => {
+                // A free port of the club's own range, taken by no listed server.
+                let hosting = self.config.hosting;
+                match servers::free_port(
+                    hosting.first_port,
+                    hosting.last_port,
+                    &servers::ports_taken(),
+                ) {
+                    Some(port) => {
+                        self.set_setting("server.port", port.to_string());
+                        self.servers.note = Some(trf(
+                            "The server now uses port {port}. Press Start again.",
+                            &[("port", &port.to_string())],
+                        ));
                     }
-                }
-            },
-            Fix::AgreeEula => {
-                if let Some(c) = &mut self.servers.create {
-                    c.eula = true;
-                    c.eula_missing = false;
-                } else if let Some(dir) = &self.servers.open {
-                    if let Err(e) = backend::agree_eula(dir) {
-                        self.servers.problem = Some(Problem::plain(e));
+                    None => {
+                        self.servers.problem = Some(Problem::plain(trf(
+                            "No port is free between {first} and {last}: stop another server, or \
+                             ask the club's supervisor for more of them.",
+                            &[
+                                ("first", &hosting.first_port.to_string()),
+                                ("last", &hosting.last_port.to_string()),
+                            ],
+                        )));
                     }
                 }
             }
@@ -903,19 +923,23 @@ impl Launcher {
 
     // ----- Creating -------------------------------------------------------------------------
 
-    fn open_create(&mut self, cx: &mut Context<Self>) {
+    /// Opens the Create dialog. `pub(super)`: the sidebars open it from their "Create a server".
+    pub(super) fn open_create(&mut self, cx: &mut Context<Self>) {
         self.focus_handle(Field::Name, cx);
         self.servers.focus_soon = Some(Field::Name);
         let worlds = servers::player_worlds();
         let name = if self.servers.list.is_empty() {
-            "My server".to_string()
+            tr("My server").to_string()
         } else {
-            format!("Server {}", self.servers.list.len() + 1)
+            trf(
+                "Server {number}",
+                &[("number", &(self.servers.list.len() + 1).to_string())],
+            )
         };
         // The glass dialog starts with an empty name (its placeholder says the default) and the
         // player as the first friend.
         let glass = self.theme.glass;
-        let own = own_name(&self.accounts).unwrap_or_default();
+        let own = own_name(&self.player).unwrap_or_default();
         self.servers
             .text(Field::Name)
             .set(if glass { String::new() } else { name });
@@ -949,10 +973,6 @@ impl Launcher {
             mode: "survival",
             difficulty: "normal",
             max_players: 10,
-            friends_only: true,
-            check_accounts: true,
-            eula: false,
-            eula_missing: false,
             friends,
             details,
         });
@@ -960,13 +980,6 @@ impl Launcher {
 
     fn create_server(&mut self) {
         if self.servers.creating {
-            return;
-        }
-        let Some(c) = &mut self.servers.create else {
-            return;
-        };
-        if !c.eula {
-            c.eula_missing = true;
             return;
         }
         let Some(c) = self.servers.create.as_ref() else {
@@ -989,20 +1002,24 @@ impl Launcher {
             name: if !name.is_empty() {
                 name
             } else if self.servers.list.is_empty() {
-                "My server".into()
+                tr("My server").into()
             } else {
-                format!("Server {}", self.servers.list.len() + 1)
+                trf(
+                    "Server {number}",
+                    &[("number", &(self.servers.list.len() + 1).to_string())],
+                )
             },
             world,
             game_mode: c.mode.into(),
             difficulty: c.difficulty.into(),
             max_players: c.max_players,
-            friends_only: c.friends_only,
-            check_accounts: c.check_accounts,
+            friends_only: true,
             players,
-            eula: c.eula,
         };
-        let tag = self.selected().cloned();
+        let Some(tag) = self.selected().map(str::to_owned) else {
+            return;
+        };
+        let hosting = self.config.hosting;
         let tx = self.servers.tx.clone();
         self.servers.creating = true;
         self.servers.problem = None;
@@ -1012,7 +1029,7 @@ impl Launcher {
             let log = move |l: String| {
                 let _ = lines.send(Event::Line(l));
             };
-            let _ = tx.send(Event::Created(servers::create(&spec, tag.as_deref(), &log)));
+            let _ = tx.send(Event::Created(servers::create(&spec, &tag, &hosting, &log)));
         });
     }
 
@@ -1040,46 +1057,26 @@ impl Launcher {
         let selected = focused && self.servers.selected == Some(f);
         let invalid = self.servers.invalid.is_some_and(|(g, _)| g == f);
         self.servers.text(f).show(((width - 24.) / 7.5) as usize);
-        // Home's Add server line is in the glass look already; the other fields follow with
-        // their pages.
+        // Every field follows its page.
         // The dark appearance draws every field in the glass look.
         let glass = t.glass;
         let base = if glass {
-            // The mods filter and the log search sit by buttons: the mockup's small `FIELD`, as
-            // tall as they are.
+            // The log search sits by buttons: the mockup's small `FIELD`, as tall as they are.
             crate::glass_ui::field(focused, invalid)
                 .when(
                     matches!(
                         f,
-                        Field::InstanceModsFilter
-                            | Field::ConsoleSearch
-                            | Field::WardrobeSearch
-                            | Field::Motd
-                            | Field::Port
-                            | Field::Token
-                            | Field::AddPlayer
-                            | Field::DeleteServer
+                        Field::ConsoleSearch | Field::Motd | Field::AddPlayer | Field::DeleteServer
                     ),
                     |d| d.h(px(36.)).px(px(12.)).rounded(px(radius::CONTROL)),
                 )
-                // The instance dialog's are the large `FIELD_LG`: 48 px, 15 px text, white at 6 %,
-                // 10 % while typed in.
-                .when(
-                    !invalid
-                        && matches!(
-                            f,
-                            Field::InstanceName
-                                | Field::InstanceGroup
-                                | Field::InstanceVersion
-                                | Field::Name
-                                | Field::Seed
-                        ),
-                    |d| {
-                        d.h(px(48.))
-                            .text_size(px(15.))
-                            .bg(crate::glass_ui::white(if focused { 0.1 } else { 0.06 }))
-                    },
-                )
+                // The Create dialog's name and seed are the large `FIELD_LG`: 48 px, 15 px text,
+                // white at 6 %, 10 % while typed in.
+                .when(!invalid && matches!(f, Field::Name | Field::Seed), |d| {
+                    d.h(px(48.))
+                        .text_size(px(15.))
+                        .bg(crate::glass_ui::white(if focused { 0.1 } else { 0.06 }))
+                })
                 // The accent's hex: `h-9 w-[96px] rounded-[10px] px-3 text-[13px] font-medium`.
                 .when(f == Field::AccentHex, |d| {
                     d.h(px(36.))
@@ -1108,13 +1105,9 @@ impl Launcher {
                     |d| {
                         let small = matches!(
                             f,
-                            Field::InstanceModsFilter
-                                | Field::ConsoleSearch
-                                | Field::WardrobeSearch
+                            Field::ConsoleSearch
                                 | Field::AccentHex
                                 | Field::Motd
-                                | Field::Port
-                                | Field::Token
                                 | Field::AddPlayer
                                 | Field::DeleteServer
                         );
@@ -1154,7 +1147,7 @@ impl Launcher {
                 &t,
                 focused,
                 selected,
-                f == Field::Token,
+                false,
                 placeholder,
             ))
             .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
@@ -1178,16 +1171,12 @@ impl Launcher {
                     this.servers.text(f).select_all();
                 }
                 match line_edit::handle(this.servers.text(f), ev, cx) {
-                    Key::Enter if matches!(f, Field::InstanceName | Field::InstanceGroup) => {
-                        this.save_instance(cx)
-                    }
                     Key::Enter => this.field_enter(f),
                     Key::Escape => {
                         this.servers.confirm_delete = false;
                         if this.servers.create.is_some() && !this.servers.creating {
                             this.servers.create = None;
                         }
-                        this.instance_escape();
                         window.blur(cx);
                     }
                     // Tab and the rest go on to the window: Tab moves the focus.
@@ -1230,44 +1219,14 @@ impl Launcher {
             Field::Motd => {
                 let motd = self.servers.value(Field::Motd).trim().to_string();
                 if motd.is_empty() {
-                    self.servers.problem =
-                        Some(Problem::plain("Type the line players see under the name."));
+                    self.servers.problem = Some(Problem::plain(tr(
+                        "Type the line players see under the name.",
+                    )));
                 } else {
                     self.set_setting("server.motd", motd);
                 }
             }
-            Field::Port => self.save_port(),
-            Field::Token => self.save_token(),
-            Field::Email => self.invite_friend(),
-            Field::InstanceName
-            | Field::InstanceGroup
-            | Field::InstanceVersion
-            | Field::InstanceModsFilter
-            | Field::ConsoleSearch
-            | Field::WardrobeSearch
-            | Field::JavaArgs
-            | Field::WindowWidth
-            | Field::WindowHeight
-            | Field::DeleteServer
-            | Field::AccentHex => {}
-            Field::PreLaunch | Field::Wrapper | Field::LaunchEnv | Field::PostExit => {
-                self.save_launch()
-            }
-            Field::MemoryLimit => self.memory_enter(),
-            Field::ShopGift => self.shop.find_soon = true,
-            Field::ServerName | Field::ServerAddress => self.add_server(),
-        }
-    }
-
-    fn save_port(&mut self) {
-        match self.servers.value(Field::Port).trim().parse::<u16>() {
-            Ok(port) if port >= 1024 => self.set_setting("server.port", port.to_string()),
-            _ => {
-                self.servers.invalid = Some((
-                    Field::Port,
-                    "Use a number from 1024 to 65535 (25565 is Minecraft's own).",
-                ))
-            }
+            Field::ConsoleSearch | Field::DeleteServer | Field::AccentHex => {}
         }
     }
 
@@ -1289,9 +1248,10 @@ impl Launcher {
         );
     }
 
-    /// A player's face, from the default skin their UUID picks (the server knows no other).
+    /// A player's face, from the default skin their UUID picks in the build's own files (the
+    /// server knows no other).
     pub(super) fn head(&mut self, uuid: &str, size: f32) -> Div {
-        let resources = servers::game_files(&servers::runtime_root(), "26.3");
+        let resources = self.selected().map(backend::resources).unwrap_or_default();
         let face = self
             .servers
             .faces
@@ -1358,6 +1318,13 @@ impl Launcher {
                 self.open_server(dir);
             }
         }
+        // HORIZON_LAUNCHER_SERVERS=create opens the Create dialog right away, for screenshots;
+        // without it the page shows its list (and one server opens its dashboard, above).
+        if self.servers.create.is_none()
+            && std::env::var("HORIZON_LAUNCHER_SERVERS").as_deref() == Ok("create")
+        {
+            self.open_create(cx);
+        }
         if t.glass {
             return self.glass_servers_page(cx);
         }
@@ -1369,33 +1336,18 @@ impl Launcher {
         }
         let header = page_header(
             "Servers",
-            "Host a world for your friends on this computer. Create one, press Start, and give them \
-             the address.",
+            "Host a world for your friends on this computer. Create one, press Start, and the \
+             other students see it in their Multiplayer tab.",
             &t,
         );
-        let actions = div()
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .child(
-                button("server-create", "Create a server", Kind::Primary, &t).on_click(
-                    cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.open_create(cx);
-                        cx.notify();
-                    }),
-                ),
-            )
-            .child({
-                let b = button("server-add", "Add a server folder…", Kind::Ghost, &t);
-                if self.servers.creating {
-                    disabled(b)
-                } else {
-                    b.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.add_server_folder(cx);
-                        cx.notify();
-                    }))
-                }
-            });
+        let actions = div().flex().items_center().gap(px(8.)).child(
+            button("server-create", "Create a server", Kind::Primary, &t).on_click(cx.listener(
+                |this, _: &ClickEvent, _, cx| {
+                    this.open_create(cx);
+                    cx.notify();
+                },
+            )),
+        );
         let mut page = div()
             .flex()
             .flex_col()
@@ -1410,34 +1362,11 @@ impl Launcher {
         {
             page = page.child(self.problem_notice(p, cx));
         }
-        // The banner, with a "Hide" once it has been on screen a while: hiding it hides the
-        // sidebar's card too, for good. Nothing at all once hidden.
-        let partner = (!self.settings.partner_hidden).then(|| {
-            let mut slot = div().relative().w(px(600.)).child(super::partner::banner(
-                "partner-servers",
-                600.,
+        if self.servers.list.is_empty() {
+            return page.child(centered(
+                tr("No server yet. Create one: it takes a few seconds, and with the defaults you get a friends-only survival world your friends join from their Multiplayer tab."),
                 &t,
             ));
-            if self.settings.partner_seen_secs >= super::partner::SEEN_BEFORE_HIDE {
-                slot = slot.child(
-                    super::partner::hide_button("partner-servers-hide", &t).on_click(cx.listener(
-                        |this, _: &ClickEvent, _, cx| {
-                            this.settings.partner_hidden = true;
-                            this.save_settings();
-                            cx.notify();
-                        },
-                    )),
-                );
-            }
-            slot
-        });
-        if self.servers.list.is_empty() {
-            return page
-                .child(centered(
-                    tr("No server yet. Create one: it takes a few seconds, and with the defaults (accept Minecraft's terms, press Create) you get a friends-only survival world."),
-                    &t,
-                ))
-                .children(partner);
         }
         let mut list = div().flex().flex_col().border_t_1().border_color(t.rule);
         for (i, e) in self.servers.list.clone().into_iter().enumerate() {
@@ -1483,60 +1412,7 @@ impl Launcher {
                 &t,
             ));
         }
-        page.child(list).children(partner)
-    }
-
-    fn add_server_folder(&mut self, cx: &mut Context<Self>) {
-        let paths = cx.prompt_for_paths(PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some("Add".into()),
-        });
-        cx.spawn(async move |this, cx| {
-            if let Ok(Ok(Some(mut paths))) = paths.await {
-                if let Some(dir) = paths.pop() {
-                    let _ = this.update(cx, |this, cx| {
-                        this.add_existing(dir);
-                        cx.notify();
-                    });
-                }
-            }
-        })
-        .detach();
-    }
-
-    /// A folder with a server.toml joins the list; a vanilla server folder is set up first (its
-    /// server.properties becomes server.toml; its world, lists and EULA stay).
-    fn add_existing(&mut self, dir: PathBuf) {
-        let name = dir
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "Server".into());
-        let tag = self.selected().cloned();
-        let tx = self.servers.tx.clone();
-        self.servers.creating = true;
-        self.servers.problem = None;
-        std::thread::spawn(move || {
-            let result = (|| {
-                if servers::program().is_none() {
-                    let tag =
-                        tag.ok_or_else(|| Problem::plain("Install a Horizon version first."))?;
-                    servers::set_up(&tag).map_err(Problem::plain)?;
-                }
-                if !dir.join("server.toml").is_file() {
-                    servers::run(&dir, &["init", "--yes"])?;
-                }
-                let entry = Entry {
-                    name,
-                    dir,
-                    host: None,
-                };
-                servers::add(entry.clone()).map_err(Problem::plain)?;
-                Ok(entry)
-            })();
-            let _ = tx.send(Event::Created(result));
-        });
+        page.child(list)
     }
 
     fn problem_notice(&self, p: Problem, cx: &mut Context<Self>) -> Div {
@@ -1544,10 +1420,8 @@ impl Launcher {
         let mut n = notice(p.message.clone(), &t).items_center();
         if let Some(fix) = p.fix {
             let label = match &fix {
-                Fix::UsePort(port) => trf("Use port {port}", &[("port", &port.to_string())]),
-                Fix::Prepare => tr("Prepare the game files").into(),
-                Fix::AgreeEula => tr("I agree to the EULA").into(),
-                Fix::ShowLog => tr("Open the logs").into(),
+                Fix::PortTaken => tr("Use a free port").to_string(),
+                Fix::ShowLog => tr("Open the logs").to_string(),
             };
             n = n.child(
                 button("problem-fix", label, Kind::Secondary, &t)
@@ -1614,7 +1488,9 @@ impl Launcher {
                     .child(div().size(px(8.)).bg(dot))
                     .child(caps(phase_label(&status)).text_color(t.muted))
                     .when_some(status.uptime.filter(|_| running), |d, up| {
-                        d.child(caps(format!("· up {}", uptime(up))).text_color(t.muted))
+                        d.child(
+                            caps(trf("up {time}", &[("time", &uptime(up))])).text_color(t.muted),
+                        )
                     }),
             )
             .child(text(theme::DISPLAY).text_color(t.ink).child(name));
@@ -1672,20 +1548,6 @@ impl Launcher {
         } else {
             disabled(restart)
         };
-        let panel = button("server-panel", "Open the web panel", Kind::Ghost, &t);
-        let panel = if running {
-            let d = dir.to_path_buf();
-            panel.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                match servers::Api::open(&d).map(|a| a.panel_link()) {
-                    Some(Ok(url)) => cx.open_url(&url),
-                    Some(Err(e)) => this.servers.problem = Some(Problem::plain(e)),
-                    None => {}
-                }
-                cx.notify();
-            }))
-        } else {
-            disabled(panel)
-        };
         let folder = dir.to_path_buf();
         let buttons = div()
             .flex()
@@ -1694,7 +1556,6 @@ impl Launcher {
             .gap(px(8.))
             .child(start)
             .child(restart)
-            .child(panel)
             .child(
                 button("server-folder", "Open the folder", Kind::Ghost, &t)
                     .on_click(move |_, _, cx| crate::glass_toast::open(cx, &folder)),
@@ -1900,21 +1761,20 @@ impl Launcher {
                             &t,
                         )
                         .bg(t.plate)
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            copy_to_clipboard(cx, gpui::ClipboardItem::new_string(
-                                copy_text.clone(),
-                            ));
-                            this.servers.copied = Some(Instant::now());
-                            cx.notify();
-                        })),
+                        .on_click(cx.listener(
+                            move |this, _: &ClickEvent, _, cx| {
+                                copy_to_clipboard(
+                                    cx,
+                                    gpui::ClipboardItem::new_string(copy_text.clone()),
+                                );
+                                this.servers.copied = Some(Instant::now());
+                                cx.notify();
+                            },
+                        )),
                     ),
             )
             .child(text(theme::CAPTION).text_color(t.ink_soft).child(tr(
-                "Friends on the same Wi-Fi: Multiplayer, Add Server, then paste this address.",
-            )))
-            .child(text(theme::CAPTION).text_color(t.muted).child(trf(
-                "Friends elsewhere can't reach it as it is: use Tailscale (free, nothing to change on your router, only people you invite), or forward TCP port {port} on your router to this computer.",
-                &[("port", &port.to_string())],
+                "The other students see this server in their Multiplayer tab while it runs.",
             )));
         let mut tab = div().flex().flex_col().gap(px(20.)).child(address_plate);
         if !status.players.is_empty() {
@@ -1938,8 +1798,7 @@ impl Launcher {
                     .child(row),
             );
         }
-        tab.child(self.internet_panel(port as u16, cx))
-            .child(self.server_console(status.running(), cx))
+        tab.child(self.server_console(status.running(), cx))
     }
 
     fn server_console(&mut self, running: bool, cx: &mut Context<Self>) -> Div {
@@ -2258,7 +2117,7 @@ impl Launcher {
                         if friends_only {
                             tr("On: only the players below can join.")
                         } else {
-                            tr("Off: anyone who has the address can join.")
+                            tr("Off: everyone on the club's network can join.")
                         }
                         .into(),
                         toggle,
@@ -2346,7 +2205,11 @@ impl Launcher {
                     .flex_1()
                     .min_w_0()
                     .gap(px(2.))
-                    .child(text(theme::UI).text_color(t.ink).child(name.to_string()))
+                    .child(
+                        text(theme::UI)
+                            .text_color(t.ink)
+                            .child(tr(name).to_string()),
+                    )
                     .child(match error {
                         Some(e) => text(theme::CAPTION).text_color(t.danger).child(tr(e)),
                         None => text(theme::CAPTION).text_color(t.muted).child(about),
@@ -2436,29 +2299,13 @@ impl Launcher {
         };
         let running = status.running();
         if self.servers.config.is_none() {
-            return div().child(centered(
-                if self.older_horizon() {
-                    tr(
-                        "This server's Horizon is too old to show its settings here. Update it on \
-                     the Backups tab, then they appear.",
-                    )
-                } else {
-                    tr("Reading the settings…")
-                },
-                &t,
-            ));
+            return div().child(centered(tr("Reading the settings…"), &t));
         }
         if self.servers.focused != Some(Field::Motd)
             && !self.servers.texts.contains_key(&Field::Motd)
         {
             let motd = self.servers.shown("server", "motd");
             self.servers.text(Field::Motd).set(motd);
-        }
-        if self.servers.focused != Some(Field::Port)
-            && !self.servers.texts.contains_key(&Field::Port)
-        {
-            let port = self.servers.shown("server", "port");
-            self.servers.text(Field::Port).set(port);
         }
         let save = |id: &'static str, f: Field, cx: &mut Context<Self>| {
             button(id, "Save", Kind::Secondary, &t).on_click(cx.listener(
@@ -2468,19 +2315,14 @@ impl Launcher {
                 },
             ))
         };
+        // 240 px: the server's column is narrow beside the side column, and the row's name and
+        // note keep a line more of their own (the field scrolls for a longer message).
         let motd = div()
             .flex()
             .items_center()
             .gap(px(8.))
-            .child(self.field(Field::Motd, tr("A Minecraft Server"), 260., cx))
+            .child(self.field(Field::Motd, tr("A Minecraft Server"), 240., cx))
             .child(save("motd-save", Field::Motd, cx))
-            .into_any_element();
-        let port = div()
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .child(self.field(Field::Port, "25565", 100., cx))
-            .child(save("port-save", Field::Port, cx))
             .into_any_element();
         let pvp = match (running, self.servers.pvp) {
             (true, Some(on)) => switch("pvp", on, &t)
@@ -2492,17 +2334,6 @@ impl Launcher {
                 .into_any_element(),
             _ => disabled(switch("pvp", true, &t)).into_any_element(),
         };
-        let accounts = self
-            .servers
-            .setting("server", "online_mode")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let accounts_switch = switch("online-mode", accounts, &t)
-            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                this.set_setting("server.online_mode", (!accounts).to_string());
-                cx.notify();
-            }))
-            .into_any_element();
         let live = if running {
             tr("Applies at once.")
         } else {
@@ -2528,7 +2359,7 @@ impl Launcher {
             ))
             .child(self.setting_row(
                 "Game mode",
-                format!("{} {live}", tr("For players who join for the first time.")),
+                format!("{} {live}", tr("The server's mode, for every player.")),
                 self.choice("set-mode", "world.game_mode", &MODES, cx),
             ))
             .child(self.setting_row(
@@ -2566,35 +2397,6 @@ impl Launcher {
                 ),
                 self.stepper("server.simulation_distance", 2..=32, cx),
             ))
-            .child(
-                self.setting_row_checked(
-                    "Port",
-                    format!(
-                        "{} {later}",
-                        tr("1024 to 65535. Friends type it after the address unless it's 25565.")
-                    ),
-                    self.servers
-                        .invalid
-                        .and_then(|(f, e)| (f == Field::Port).then_some(e)),
-                    port,
-                ),
-            )
-            .child(self.setting_row(
-                "Check Minecraft accounts",
-                if accounts {
-                    format!(
-                        "{} {later}",
-                        tr("On: players must own Minecraft and sign in with Microsoft.")
-                    )
-                } else {
-                    format!(
-                        "{} {later}",
-                        tr("Off: anyone can play under any name, so keep Friends only on.")
-                    )
-                },
-                accounts_switch,
-            ))
-            .child(self.background_row(cx))
             .child(self.delete_server_section(status, cx));
         div()
             .flex()
@@ -2619,12 +2421,9 @@ impl Launcher {
         let ready = !status.running()
             && self.servers.busy.is_none()
             && !self.servers.applying
-            && self.servers.queued.is_empty()
-            && self.servers.service == Some(false);
+            && self.servers.queued.is_empty();
         let hint = if status.running() {
             Some(tr("Stop the server before deleting it."))
-        } else if self.servers.service == Some(true) {
-            Some(tr("Turn off running in the background before deleting it."))
         } else if !ready {
             Some(tr("Wait for the current operation to finish."))
         } else {
@@ -2724,156 +2523,6 @@ impl Launcher {
         .items_start()
     }
 
-    fn background_row(&mut self, cx: &mut Context<Self>) -> Div {
-        let t = self.theme;
-        let on = self.servers.service.unwrap_or(false);
-        let idle = self.servers.busy.is_none() && self.servers.service.is_some();
-        let toggle = switch("background", on, &t);
-        let toggle = if idle {
-            toggle.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                this.server_command(
-                    if on {
-                        "Turning off running in the background"
-                    } else {
-                        "Setting it to run in the background"
-                    },
-                    vec![
-                        "service".into(),
-                        if on { "uninstall" } else { "install" }.into(),
-                    ],
-                );
-                cx.notify();
-            }))
-        } else {
-            disabled(toggle)
-        };
-        self.setting_row(
-            "Run in the background and at login",
-            if on {
-                tr(
-                    "On: starts when you log in to this computer, keeps running when the launcher \
-                 closes, and comes back by itself if the computer restarts.",
-                )
-                .into()
-            } else {
-                tr("Off: the server stops when you close the launcher.").into()
-            },
-            toggle.into_any_element(),
-        )
-    }
-
-    fn updates_section(&mut self, status: &Status, cx: &mut Context<Self>) -> Div {
-        let t = self.theme;
-        // The glass look draws no rules between rows, as the mockup.
-        let rule = if t.glass {
-            gpui::transparent_black()
-        } else {
-            t.rule
-        };
-        let idle = self.servers.busy.is_none();
-        let check = self.servers.update.clone();
-        let release = status
-            .release
-            .clone()
-            .or_else(|| {
-                check
-                    .as_ref()
-                    .and_then(|u| u["installed"].as_str().map(str::to_string))
-            })
-            .or_else(servers::runtime_release)
-            .unwrap_or_else(|| "?".into());
-        let available = status.update_available.clone().or_else(|| {
-            check
-                .as_ref()
-                .filter(|u| u["available"] == true)
-                .and_then(|u| u["newest"].as_str().map(str::to_string))
-        });
-        let about = match (&available, &check, &status.update_last) {
-            (Some(tag), _, _) => trf(
-                "Update available: Horizon {tag} (this server runs {release}). Updating backs up \
-                 the world first, and goes back by itself if the new version doesn't start.",
-                &[("tag", tag), ("release", &release)],
-            ),
-            (None, Some(_), _) => trf("Up to date: Horizon {release}.", &[("release", &release)]),
-            (None, None, Some((last, _))) => format!("Horizon {release}. {last}"),
-            (None, None, None) => format!("Horizon {release}."),
-        };
-        let control = match available {
-            Some(tag) => {
-                let b = button("update-now", "Update now", Kind::Primary, &t);
-                if idle {
-                    b.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.servers.update = None;
-                        if let Some(dir) = this.servers.open.clone() {
-                            let done = format!(
-                                "Updated to Horizon {tag}. The world was backed up first (Backups)."
-                            );
-                            this.server_job(format!("Updating to {tag}"), move |log| {
-                                servers::run_streamed(&dir, &["update"], log).map(|_| done)
-                            });
-                        }
-                        cx.notify();
-                    }))
-                } else {
-                    disabled(b)
-                }
-            }
-            None if self.servers.checking => {
-                disabled(button("update-check", "Checking…", Kind::Secondary, &t))
-            }
-            None if !idle => disabled(button(
-                "update-check",
-                "Check for updates",
-                Kind::Secondary,
-                &t,
-            )),
-            None => button("update-check", "Check for updates", Kind::Secondary, &t).on_click(
-                cx.listener(|this, _: &ClickEvent, _, cx| {
-                    if let Some(dir) = this.servers.open.clone() {
-                        this.servers.checking = true;
-                        let tx = this.servers.tx.clone();
-                        std::thread::spawn(move || {
-                            let result = servers::run(&dir, &["update", "--check", "--json"])
-                                .and_then(|out| {
-                                    serde_json::from_str(out.trim())
-                                        .map_err(|e| Problem::plain(e.to_string()))
-                                });
-                            let _ = tx.send(Event::UpdateCheck(result));
-                        });
-                    }
-                    cx.notify();
-                }),
-            ),
-        };
-        let mut rows = div()
-            .flex()
-            .flex_col()
-            .border_t_1()
-            .border_color(rule)
-            .child(self.setting_row("This server's Horizon", about, control.into_any_element()));
-        if self.servers.setting("updates", "keep").is_some() {
-            rows = rows.child(self.setting_row(
-                "Older versions kept",
-                tr("Downloaded versions kept besides the one in use and the one an update can go back \
-                 to.")
-                    .into(),
-                self.stepper("updates.keep", 0..=5, cx),
-            ));
-        }
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(10.))
-            .child(self.tab_heading(tr("Updates")))
-            .child(rows)
-    }
-
-    /// The server's details came back without its settings: its horizon-server predates
-    /// `config` (and `backups --json`).
-    fn older_horizon(&self) -> bool {
-        self.servers.service.is_some() && self.servers.config.is_none()
-    }
-
     fn backups_tab(&mut self, status: &Status, cx: &mut Context<Self>) -> Div {
         let t = self.theme;
         // The glass look draws no rules between rows, as the mockup.
@@ -2930,10 +2579,15 @@ impl Launcher {
                 restore.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     if this.servers.confirm_restore.as_ref() == Some(&name) {
                         this.servers.confirm_restore = None;
-                        if let Some(dir) = this.servers.open.clone() {
+                        if let Some((dir, tag)) = this
+                            .servers
+                            .open
+                            .clone()
+                            .zip(this.selected().map(str::to_owned))
+                        {
                             let (name, restored) = (name.clone(), restored.clone());
                             this.server_job("Restoring", move |log| {
-                                servers::run_streamed(&dir, &["restore", &name, "--yes"], log)
+                                servers::run_streamed(&tag, &dir, &["restore", &name, "--yes"], log)
                                     .map(|_| restored)
                             });
                         }
@@ -2980,14 +2634,6 @@ impl Launcher {
                     }),
             ),
         );
-        if self.older_horizon() {
-            return tab
-                .child(text(theme::UI).text_color(t.muted).child(tr(
-                    "This server's Horizon is too old to list its backups here: they're in its \
-                     backups folder. Update it below.",
-                )))
-                .child(self.updates_section(status, cx));
-        }
         tab = tab.child(self.toggle_row(
             "Back up automatically",
             if auto {
@@ -3012,7 +2658,7 @@ impl Launcher {
                 &t,
             ));
         }
-        tab = if self.servers.backups.is_empty() {
+        if self.servers.backups.is_empty() {
             tab.child(
                 text(theme::UI)
                     .text_color(t.muted)
@@ -3020,8 +2666,7 @@ impl Launcher {
             )
         } else {
             tab.child(list)
-        };
-        tab.child(self.updates_section(status, cx))
+        }
     }
 
     // ----- The Create dialog ----------------------------------------------------------------
@@ -3034,15 +2679,25 @@ impl Launcher {
         let c = self.servers.create.as_ref()?;
         let (new_world, copy, worlds) = (c.new_world, c.copy.clone(), c.worlds.clone());
         let (mode, difficulty, max_players) = (c.mode, c.difficulty, c.max_players);
-        let (friends_only, eula, eula_missing) = (c.friends_only, c.eula, c.eula_missing);
         let creating = self.servers.creating;
-        let row = |label: &'static str, control: AnyElement| {
+        // A section: its name in capital letters, in the launcher's language, over its control.
+        let row = |label: String, control: AnyElement| {
             div()
                 .flex()
                 .flex_col()
                 .gap(px(8.))
                 .child(caps(label).text_color(t.muted))
                 .child(control)
+        };
+        // Two short sections share a line in two halves (one under the other when narrow).
+        let half = |d: Div| d.flex_1().min_w(px(280.));
+        let pair = |left: Div, right: Div| {
+            div()
+                .flex()
+                .flex_wrap()
+                .gap(px(20.))
+                .child(half(left))
+                .child(half(right))
         };
         let weak = cx.entity().downgrade();
         let pick = move |f: fn(&mut Create, &'static str)| {
@@ -3070,6 +2725,7 @@ impl Launcher {
                 400.,
                 cx,
             )
+            .w_full()
             .into_any_element()
         } else if worlds.is_empty() {
             text(theme::CAPTION)
@@ -3128,16 +2784,6 @@ impl Launcher {
             &t,
             pick(|c, v| c.difficulty = v),
         );
-        let who = segments(
-            "create-who",
-            &[
-                ("friends", "Friends only"),
-                ("anyone", "Anyone with the address"),
-            ],
-            if friends_only { "friends" } else { "anyone" },
-            &t,
-            pick(|c, v| c.friends_only = v == "friends"),
-        );
         let step = |id: &'static str, label: &'static str, delta: i32, cx: &mut Context<Self>| {
             button(id, label, Kind::Secondary, &t)
                 .w(px(36.))
@@ -3155,58 +2801,17 @@ impl Launcher {
             .gap(px(8.))
             .child(step("create-fewer", "−", -1, cx))
             .child(
+                // As tall as its buttons: the number sits in their middle.
                 text(theme::UI)
                     .w(px(44.))
+                    .h(px(36.))
                     .flex()
+                    .items_center()
                     .justify_center()
                     .text_color(t.ink)
                     .child(max_players.to_string()),
             )
             .child(step("create-more", "+", 1, cx));
-        let checkbox = |id: &'static str, on: bool| {
-            div()
-                .id(id)
-                .flex_none()
-                .size(px(18.))
-                .border_1()
-                .border_color(if on { t.accent } else { t.muted })
-                .bg(if on { t.accent } else { t.surface })
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_color(t.on_accent)
-                .text_size(px(12.))
-                .cursor_pointer()
-                .when(on, |d| d.child("✓"))
-        };
-        let eula_line = div()
-            .flex()
-            .items_center()
-            .gap(px(10.))
-            .child(checkbox("create-eula", eula).on_click(cx.listener(
-                |this, _: &ClickEvent, _, cx| {
-                    if let Some(c) = &mut this.servers.create {
-                        c.eula = !c.eula;
-                        c.eula_missing = false;
-                    }
-                    cx.notify();
-                },
-            )))
-            .child(
-                text(theme::UI)
-                    .text_color(if eula_missing { t.danger } else { t.ink })
-                    .child("I agree to the Minecraft EULA"),
-            )
-            .child(
-                div()
-                    .id("create-eula-read")
-                    .text_size(px(theme::UI.px))
-                    .text_color(t.accent)
-                    .cursor_pointer()
-                    .hover(|s| s.opacity(0.8))
-                    .child(tr("Read it"))
-                    .on_click(|_, _, cx| cx.open_url(servers::EULA_URL)),
-            );
         let body = div()
             .id("create-body")
             .flex()
@@ -3217,61 +2822,69 @@ impl Launcher {
             .pt(px(28.))
             .pb(px(20.))
             .overflow_y_scroll()
-            .child(caps("New server").text_color(t.muted))
+            .child(caps(tr("New server")).text_color(t.muted))
             .child(
                 text(theme::HEADING)
                     .text_color(t.ink)
                     .child(tr("Create a server")),
             )
             .child(text(theme::CAPTION).text_color(t.muted).child(tr(
-                "Everything has a default: accept Minecraft's terms and Create makes a friends-only survival \
-                world. You can change all of it later, from the server's Settings tab.",
+                "Everything has a default: Create makes a friends-only survival world. You can \
+                 change all of it later, from the server's Settings tab.",
             )))
             .child(row(
-                "Name",
+                tr("Name").to_string(),
                 self.field(Field::Name, "My server", 400., cx)
+                    .w_full()
                     .into_any_element(),
             ))
             .child(row(
-                "World",
+                tr("World").to_string(),
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(10.))
-                    .child(div().flex().child(world_kind))
+                    .child(div().flex().flex_wrap().child(world_kind))
                     .child(world_detail)
                     .into_any_element(),
             ))
-            .child(row(
-                "Game mode",
-                div().flex().child(modes).into_any_element(),
+            .child(pair(
+                row(
+                    tr("Game mode").to_string(),
+                    div().flex().flex_wrap().child(modes).into_any_element(),
+                ),
+                row(
+                    tr("Difficulty").to_string(),
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .child(difficulties)
+                        .into_any_element(),
+                ),
             ))
-            .child(row(
-                "Difficulty",
-                div().flex().child(difficulties).into_any_element(),
-            ))
-            .child(row("Most players at once", players.into_any_element()))
-            .child(row(
-                "Who can join",
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(10.))
-                    .child(div().flex().child(who))
-                    .when(friends_only, |d| {
-                        d.child(self.field(
+            .child(pair(
+                row(
+                    tr("Most players at once").to_string(),
+                    players.into_any_element(),
+                ),
+                row(
+                    tr("Who can join").to_string(),
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(10.))
+                        .child(self.field(
                             Field::Players,
                             "Players allowed in, separated by commas (you first)",
                             480.,
                             cx,
                         ))
-                        .child(text(theme::CAPTION).text_color(t.muted).child(
+                        .child(text(theme::CAPTION).text_color(t.muted).child(tr(
                             "The first one becomes an operator. Add more later on the Players tab.",
-                        ))
-                    })
-                    .into_any_element(),
-            ))
-            .child(eula_line);
+                        )))
+                        .into_any_element(),
+                ),
+            ));
         let mut foot = div()
             .flex()
             .flex_none()
@@ -3289,7 +2902,7 @@ impl Launcher {
                     .min_w_0()
                     .text_color(t.muted)
                     .truncate()
-                    .child(format!("Creating… {last}")),
+                    .child(format!("{} {last}", tr("Creating…"))),
             );
         } else if let Some(p) = &self.servers.problem {
             foot = foot.child(
@@ -3298,23 +2911,6 @@ impl Launcher {
                     .min_w_0()
                     .text_color(t.danger)
                     .child(p.message.clone()),
-            );
-            if let Some(fix @ Fix::Prepare) = p.fix.clone() {
-                foot = foot.child(
-                    button("create-fix", "Prepare the game files", Kind::Secondary, &t).on_click(
-                        cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            this.fix(fix.clone(), cx);
-                            cx.notify();
-                        }),
-                    ),
-                );
-            }
-        } else if eula_missing {
-            foot = foot.child(
-                text(theme::CAPTION)
-                    .flex_1()
-                    .text_color(t.danger)
-                    .child(tr("Tick the EULA box to create the server.")),
             );
         }
         let cancel = button("create-cancel", tr("Cancel"), Kind::Secondary, &t);
@@ -3336,7 +2932,7 @@ impl Launcher {
             .flex()
             .flex_col()
             .w_full()
-            .max_w(px(640.))
+            .max_w(px(760.))
             .max_h_full()
             .bg(t.page)
             .border_1()
@@ -3365,9 +2961,6 @@ impl Launcher {
 
 /// The state, in a few words.
 fn phase_label(status: &Status) -> String {
-    if let Some(busy) = &status.update_busy {
-        return trf("Updating: {step}", &[("step", busy)]);
-    }
     match status.phase.as_str() {
         "running" if status.crashes > 0 => tr("Running · restarted after a crash").into(),
         "running" if status.paused => tr("Running · paused while nobody plays").into(),
@@ -3387,7 +2980,6 @@ fn setting_name(key: &str) -> &str {
         "server.max_players" => "most players",
         "server.view_distance" => "view distance",
         "server.simulation_distance" => "simulation distance",
-        "server.online_mode" => "account checks",
         other => other,
     }
 }
@@ -3395,65 +2987,6 @@ fn setting_name(key: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[cfg(unix)]
-    #[test]
-    fn managed_start_and_restart_require_consent_before_running_the_supervisor() {
-        const CHILD: &str = "HORIZON_MANAGED_CONSENT_TEST";
-        if std::env::var_os(CHILD).is_none() {
-            let root = tempfile::tempdir().unwrap();
-            let status = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--include-ignored", "--exact", "servers_page::tests::managed_start_and_restart_require_consent_before_running_the_supervisor", "--nocapture"])
-                .env(CHILD, "1")
-                .env("HORIZON_LAUNCHER_HOME", root.path().join("launcher"))
-                .env("HORIZON_HOME", root.path().join("cache"))
-                .status().unwrap();
-            assert!(status.success());
-            return;
-        }
-        use std::os::unix::fs::PermissionsExt;
-        let root = tempfile::tempdir().unwrap();
-        let bin = servers::runtime_root().join("current");
-        std::fs::create_dir_all(&bin).unwrap();
-        let supervisor = bin.join("horizon-server");
-        std::fs::write(&supervisor, "#!/bin/sh\nprintf ran > \"$2/ran\"\n").unwrap();
-        std::fs::set_permissions(&supervisor, std::fs::Permissions::from_mode(0o700)).unwrap();
-        std::fs::write(bin.join("horizon-engine"), "never executed").unwrap();
-        std::fs::write(root.path().join("horizon-resources.json"), "{}").unwrap();
-        let config = format!(
-            "[engine]\nresources = {:?}\n",
-            root.path().to_str().unwrap()
-        );
-        std::fs::write(root.path().join("server.toml"), config).unwrap();
-        let package = root
-            .path()
-            .join(horizon_platform::mod_package::mod_list::DIR)
-            .join("needs_jar");
-        std::fs::create_dir_all(&package).unwrap();
-        std::fs::write(package.join("horizon-mod.toml"), format!(
-            "id='needs_jar'\nname='Needs jar'\nversion='1'\napi='0.2'\ncapabilities=['registries']\n[[jar]]\nid='fixture'\nversion='1'\nsha512='{}'\n", "a".repeat(128)
-        )).unwrap();
-        std::fs::write(
-            root.path()
-                .join(horizon_platform::mod_package::mod_list::FILE),
-            "mod.needs_jar:true\n",
-        )
-        .unwrap();
-        for action in ["start", "restart"] {
-            let (tx, rx) = std::sync::mpsc::channel();
-            let dir = root.path().to_path_buf();
-            let job = std::thread::spawn(move || run_managed_server(&tx, &dir, &[action], &|_| {}));
-            let message = rx.recv_timeout(Duration::from_secs(10)).unwrap();
-            let backend::Msg::JarConsent { jars, reply } = message else {
-                panic!("expected jar consent")
-            };
-            assert_eq!(jars.len(), 1);
-            assert_eq!(jars[0].id(), "fixture");
-            reply.send(false).unwrap();
-            assert!(job.join().unwrap().is_err());
-            assert!(!root.path().join("ran").exists());
-        }
-    }
 
     #[test]
     fn backups_read_for_people() {

@@ -4,13 +4,20 @@ use super::*;
 impl Render for Launcher {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
+        // The window's title is the club's name, as its file last gave it (the taskbar's; the
+        // drawn title bar's is drawn below). Set when it changes, not every frame.
+        let club = self.config.club.name.clone();
+        if self.title.as_deref() != Some(club.as_str()) {
+            window.set_window_title(&club);
+            self.title = Some(club.clone());
+        }
         if specimen::wanted() {
             return div()
                 .flex()
                 .flex_col()
                 .size_full()
                 .bg(t.side)
-                .children(titlebar::render(&t, window))
+                .children(titlebar::render(&t, &club, window))
                 .child(specimen::render(&t));
         }
         if std::mem::take(&mut self.restyle) {
@@ -50,11 +57,7 @@ impl Render for Launcher {
             self.bench_scroll(window);
         }
         self.servers.note_focus(window, cx);
-        self.friend_focused = self.friend_focus.is_focused(window);
-        self.mods.note_focus(window);
-        self.github.note_focus(window);
-        self.args_focused = self.args_focus.is_focused(window);
-        self.proxy_focused = self.proxy_focus.is_focused(window);
+        self.update.poll();
         self.settings_query_focused = self.settings_query_focus.is_focused(window);
         let size = window.viewport_size();
         self.window_width = f32::from(size.width);
@@ -68,15 +71,10 @@ impl Render for Launcher {
         let content = match shown {
             Page::Play => self.play_page(cx),
             Page::Versions => self.versions_page(cx),
-            Page::Mods => self.mods_page(cx),
             Page::Servers => self.servers_page(cx),
-            Page::Wardrobe => self.wardrobe_page(cx),
-            Page::Shop => self.shop_page(cx),
             Page::Settings => self.settings_page(cx),
         };
         self.pictures.free_retired(window);
-        self.wardrobe_marks.free_replaced(window);
-        self.shop.free_replaced(window);
         // The new page fades in and rises a few pixels, as the website's tabs do (`hzl-pop`).
         let content = div()
             .relative()
@@ -175,19 +173,6 @@ impl Render for Launcher {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    // A scrolled page is drawn from its layer, not
-                    // rendered: the Mods page's card asks, once the
-                    // offset has moved, whether it must follow.
-                    .on_scroll(cx.listener(|this, _: &gpui::ScrollEvent, window, cx| {
-                        if this.page != Page::Mods {
-                            return;
-                        }
-                        cx.on_next_frame(window, |this, _, cx| {
-                            if this.mods_sticky.moved(&this.content_scroll.handle) {
-                                cx.notify();
-                            }
-                        });
-                    }))
                     .child(
                         div()
                             .flex()
@@ -212,13 +197,6 @@ impl Render for Launcher {
         let mut root = div()
             .id("root")
             .track_focus(&self.root_focus)
-            .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
-                if ev.keystroke.key == "escape" && this.pending_consent.is_some() {
-                    this.cancel_native_consent();
-                    cx.stop_propagation();
-                    cx.notify();
-                }
-            }))
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
                 let k = &ev.keystroke;
                 match k.key.as_str() {
@@ -230,15 +208,8 @@ impl Render for Launcher {
                             window.focus_next(cx);
                         }
                     }
-                    "escape" if this.welcome_escape() => {}
-                    "escape" if this.consent_escape() => {}
-                    "escape" if this.native_log_escape() => {}
                     "escape" if this.servers_escape() => {}
-                    "escape" if this.instance_escape() => {}
                     "escape" if this.settings_escape() => {}
-                    "escape" if this.screenshot_escape() => {}
-                    "left" if this.screenshot_step(false) => {}
-                    "right" if this.screenshot_step(true) => {}
                     _ => return,
                 }
                 cx.stop_propagation();
@@ -284,7 +255,7 @@ impl Render for Launcher {
                     .top(px(theme::RISE * (1. - ui)))
                     .child(topbar)
                     // The page keeps the collapsed rail's room; the rail opens over it, so the
-                    // page never moves or squeezes when the pointer reaches for an instance.
+                    // page never moves or squeezes when the pointer reaches for a name.
                     .child(
                         div()
                             .relative()
@@ -327,38 +298,17 @@ impl Render for Launcher {
                 root = root.child(dialog);
             }
         }
-        root = self.import_drop_target(root, cx);
-        root = root.children(self.import_note(cx));
-        if let Some(dialog) = self.instance_dialog(cx) {
+        if let Some(dialog) = self.update_dialog(cx) {
             root = root.child(dialog);
         }
         if t.glass && self.page == Page::Settings {
             root = root.child(self.settings_dialog(cx));
-        }
-        if let Some(panel) = self.native_log_panel(cx) {
-            root = root.child(panel);
-        }
-        if self.page == Page::Play {
-            if let Some(viewer) = self.screenshot_viewer(cx) {
-                root = root.child(viewer);
-            }
         }
         if t.glass {
             root = root.children(self.toast_float());
         }
         if let Some(palette) = self.palette_overlay(window, cx) {
             root = root.child(palette);
-        }
-        if self.pending_consent.is_some() {
-            root = root.child(self.native_consent(cx));
-        }
-        if self.welcoming() {
-            root = root.child(self.welcome_screen(cx));
-        } else if self.asking_consent() {
-            root = root.child(self.consent_screen(cx));
-        }
-        if self.asking_owner() {
-            root = root.child(self.owner_screen(cx));
         }
         if let Some(opening) = &self.opening {
             // The wordmark arrives letter by letter, then gives way to the launcher; a click or
@@ -419,7 +369,7 @@ impl Render for Launcher {
             .flex_col()
             .relative()
             .size_full()
-            .children(titlebar::render(&t, window))
+            .children(titlebar::render(&t, &club, window))
             .children(self.settings_save_notice(cx))
             .child(root.flex_1().min_h_0())
             .children(titlebar::resize_handles(window))
@@ -447,12 +397,11 @@ impl Launcher {
         if motion::still() {
             self.opening = None;
         }
-        let loaded = !matches!(self.releases, Load::Loading);
         let Some(opening) = &mut self.opening else {
             return (1., 10.);
         };
         let held = opening.started.get_or_insert_with(Instant::now).elapsed();
-        if opening.reveal.is_none() && ((held >= OPENING_HOLD && loaded) || held >= OPENING_MAX) {
+        if opening.reveal.is_none() && held >= OPENING_HOLD {
             opening.reveal = Some(Instant::now());
         }
         let reveal = opening.reveal.map_or(0., |at| {

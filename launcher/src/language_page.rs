@@ -1,17 +1,26 @@
-//! Settings' Language row (`horizon_launcher::i18n`): a dropdown of the system's language and the
+//! Settings' Language row (`horizon_launcher::i18n`): a dropdown of the club's language and the
 //! ones the launcher has, each named in itself. A list rather than a segment per language: nine
-//! segments took the row's whole width and left the row's own sentence a character wide.
+//! segments took the row's whole width and left the row's own sentence a character wide (the
+//! edition ships two).
 use super::*;
 use crate::glass_ui as ui;
+use horizon_launcher::config::Language as Club;
 use horizon_launcher::i18n::Language;
 
-/// What the dropdown shows for a choice: the system's, in the launcher's language, or a
-/// language's name in itself (never through the table: a table entry for "English" would rename
-/// the very entry a player looks for).
-fn choice_name(choice: Option<Language>) -> &'static str {
+/// The languages the dropdown offers, after the club's own choice: the two the edition ships
+/// (docs/school-edition/launcher-target.md, section 11).
+const SHIPPED: [Language; 2] = [Language::English, Language::French];
+
+/// What the dropdown shows for a choice: the club's, in the launcher's language, or a language's
+/// name in itself (never through the table: a table entry for "English" would rename the very
+/// entry a player looks for).
+fn choice_name(choice: Option<Language>, club: Club) -> String {
     match choice {
-        None => tr("System"),
-        Some(language) => language.name(),
+        None => trf(
+            "Club's language ({language})",
+            &[("language", club.of().name())],
+        ),
+        Some(language) => language.name().to_string(),
     }
 }
 
@@ -19,7 +28,7 @@ impl Launcher {
     fn pick_language(&mut self, choice: Option<Language>, cx: &mut Context<Self>) {
         self.settings.language = choice;
         self.save_settings();
-        i18n::set(self.settings.language());
+        i18n::set(self.settings.language(self.config.club.language));
         self.language_menu = false;
         cx.notify();
     }
@@ -33,12 +42,13 @@ impl Launcher {
             .flex_col()
             .max_h(px(360.))
             .overflow_y_scroll();
-        for choice in std::iter::once(None).chain(Language::ALL.map(Some)) {
-            let id = choice.map_or("system", Language::code);
+        let club = self.config.club.language;
+        for choice in std::iter::once(None).chain(SHIPPED.map(Some)) {
+            let id = choice.map_or("club", Language::code);
             rows = rows.child(
                 ui::pick_row(
                     format!("language-pick-{id}"),
-                    choice_name(choice),
+                    SharedString::from(choice_name(choice, club)),
                     choice == self.settings.language,
                     &t,
                 )
@@ -99,7 +109,10 @@ impl Launcher {
                         .text_size(px(15.))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(t.ink)
-                        .child(choice_name(self.settings.language)),
+                        .child(choice_name(
+                            self.settings.language,
+                            self.config.club.language,
+                        )),
                 )
                 .child(blocks::icon("chevron-down", 16., t.muted))
                 .on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
@@ -126,9 +139,10 @@ impl Launcher {
                 .flex()
                 .flex_col()
                 .occlude();
-            for choice in std::iter::once(None).chain(Language::ALL.map(Some)) {
+            let club = self.config.club.language;
+            for choice in std::iter::once(None).chain(SHIPPED.map(Some)) {
                 let chosen = choice == self.settings.language;
-                let id = choice.map_or("system", Language::code);
+                let id = choice.map_or("club", Language::code);
                 menu = menu.child(
                     div()
                         .id(SharedString::from(format!("language-pick-{id}")))
@@ -144,7 +158,7 @@ impl Launcher {
                         .child(
                             text(theme::LABEL)
                                 .text_color(t.ink)
-                                .child(choice_name(choice)),
+                                .child(choice_name(choice, club)),
                         )
                         .when(chosen, |d| d.child(div().size(px(6.)).bg(t.accent)))
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
@@ -154,14 +168,13 @@ impl Launcher {
             }
             wrap = wrap.child(gpui::deferred(menu).with_priority(1));
         }
-        // The sentence is about following the computer's language, so it says nothing true once
-        // the player has picked one: the row keeps it only while the choice is the system's.
+        // The sentence says where the language comes from, so it says nothing true once the
+        // student has picked one: the row keeps it only while the choice is the club's.
         let said = self.settings.language.is_none().then(|| {
             div()
                 .child(trf(
-                    "System follows your computer's language: {language} here. Text not \
-                     translated yet shows in English.",
-                    &[("language", Language::system().name())],
+                    "The club's file club.toml sets the language: {language} here.",
+                    &[("language", self.config.club.language.of().name())],
                 ))
                 .into_any_element()
         });
@@ -175,9 +188,19 @@ mod tests {
     use horizon_launcher::i18n::{current, tr_in};
 
     #[test]
-    fn a_language_is_named_in_itself_and_the_system_choice_in_the_launchers_language() {
-        assert_eq!(choice_name(Some(Language::Russian)), "Русский");
-        assert_eq!(choice_name(Some(Language::English)), "English");
-        assert_eq!(choice_name(None), tr_in(current(), "System"));
+    fn a_language_is_named_in_itself_and_the_clubs_choice_in_the_launchers_language() {
+        assert_eq!(
+            choice_name(Some(Language::French), Club::English),
+            "Français"
+        );
+        assert_eq!(
+            choice_name(Some(Language::English), Club::French),
+            "English"
+        );
+        // The club's choice names the club's language, in the launcher's language.
+        let said =
+            tr_in(current(), "Club's language ({language})").replace("{language}", "Français");
+        assert_eq!(choice_name(None, Club::French), said);
+        assert!(choice_name(None, Club::English).ends_with("(English)"));
     }
 }

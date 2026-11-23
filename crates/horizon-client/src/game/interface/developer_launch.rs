@@ -57,6 +57,10 @@ impl Game<'_> {
                 horizon_client::lang::get("horizon.developer_offline.single_player").into(),
             );
         }
+        // A managed build without its rule plays single player only (crate::managed).
+        if local.is_none() && !horizon_client::managed::multiplayer() {
+            return Err(horizon_client::lang::get(horizon_client::managed::NO_RULE).into());
+        }
         self.connect_remote_session(address, name, local, cookies, lan, realm)
     }
 }

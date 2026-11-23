@@ -1,6 +1,6 @@
-//! The step Play is on before the game's process exists, as the start's threads say it. Checking
-//! the assets, updating registry mods, reading the sign-in, a pack's carried mods and the Java
-//! jars can take minutes on a modded instance, and the window said only "Starting".
+//! The step Play is on before the game's process exists, as the start's thread says it. Ready
+//! the game's command can take a while (on Windows the first Play of a build copies it), and
+//! the window said only "Starting".
 use horizon_launcher::backend::{self, Msg};
 use std::sync::mpsc::Sender;
 
@@ -48,19 +48,12 @@ mod tests {
     #[test]
     fn steps_reach_the_window_in_order_and_clear_when_the_start_ends() {
         let (tx, rx) = std::sync::mpsc::channel();
-        let steps = [
-            "Checking the game's assets…",
-            "Reading the sign-in…",
-            "Preparing Java jars…",
-        ];
+        let steps = ["Starting the game…", "Another step…"];
         std::thread::spawn(move || {
             for step in steps {
                 say(&tx, "a step", step.to_owned());
             }
-            let _ = tx.send(Msg::JarClient {
-                run: None,
-                prepared: Box::new(Err("refused".into())),
-            });
+            let _ = tx.send(Msg::GamePrepared(Box::new(Err("refused".into()))));
             say(&tx, "late", "Too late…".to_owned());
         })
         .join()
@@ -71,7 +64,7 @@ mod tests {
         for message in rx.try_iter() {
             match message {
                 Msg::PlayStep(said) => console.extend(step.said(starting, said)),
-                Msg::JarClient { .. } => starting = false,
+                Msg::GamePrepared(_) => starting = false,
                 _ => panic!("another message"),
             }
             step.settle(starting);
@@ -79,9 +72,6 @@ mod tests {
         }
         assert_eq!(console, steps);
         let some = |s: &str| Some(s.to_owned());
-        assert_eq!(
-            shown,
-            [some(steps[0]), some(steps[1]), some(steps[2]), None, None]
-        );
+        assert_eq!(shown, [some(steps[0]), some(steps[1]), None, None]);
     }
 }

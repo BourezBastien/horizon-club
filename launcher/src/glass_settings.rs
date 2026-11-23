@@ -3,37 +3,25 @@
 //! the list follows the scroll and takes the pane to a section. The rows inside are the mockup's
 //! `SettingRow`s ([`glass_ui::flat_rows`]).
 //!
-//! Not in the mockup, kept in its patterns: the appearance, the Home background, the data and
-//! logs folders and the applications menu (About's rows), the AI clients and the hidden developer options. The mockup's About tiles for Horizon and
-//! the launcher open Updates here, beside the switches that decide how updates install. The mockup's Native mods switch is the
-//! native mods' build profile here: they are always on.
+//! Three parts (docs/school-edition/launcher-target.md, section 10): General, Appearance, About.
+//! Not in the mockup, kept in its patterns: the appearance, the Home background and the logs
+//! folder (About's rows).
 
 use super::*;
 use crate::glass_ui::{self as ui, white};
 use horizon_theme::glass::{ink, radius};
 
 /// The list's entries: name and icon. The settings sections, in the mockup's order.
-const SECTIONS: [(&str, &str); 10] = [
+const SECTIONS: [(&str, &str); 3] = [
     ("General", "sliders-horizontal"),
     ("Appearance", "color-picker"),
-    ("Accounts", "user"),
-    ("Updates", "refresh"),
-    ("Game", "game-controller-01"),
-    ("Network", "globe-02"),
-    ("Storage", "package-01"),
-    ("Data & privacy", "view"),
-    ("AI", "ai-chat-02"),
     ("About", "information-circle"),
 ];
 
 /// What the search finds in each section, in [`SECTIONS`]' order: its rows' names and words a
 /// player may look for them by. English; a query matches them and their translation.
-const INDEX: [&[&str]; 10] = [
-    &[
-        "Language",
-        "While playing",
-        "Show the Horizon logo at startup",
-    ],
+const INDEX: [&[&str]; 3] = [
+    &["Language", "While playing"],
     &[
         "Theme",
         "Accent",
@@ -46,41 +34,10 @@ const INDEX: [&[&str]; 10] = [
         "Shine on hover",
         "Effects",
         "Home background",
-        "Reset the launcher's look",
         "Dark",
         "Light",
     ],
-    &[
-        "Microsoft account",
-        "Sign in with Microsoft",
-        "Sign out",
-        "Play as",
-        "Skin",
-    ],
-    &[
-        "Install new versions automatically",
-        "Delete old versions automatically",
-        "Check now",
-        "Nightly",
-    ],
-    &[
-        "Game architecture",
-        "Arguments",
-        "Update mods automatically",
-        "Memory",
-    ],
-    &["Proxy"],
-    &["Storage", "Disk space", "Cache"],
-    &["Data collection", "Telemetry", "Crash reports"],
-    &["No AI", "Agents", "MCP"],
-    &[
-        "Credits",
-        "GitHub",
-        "Version",
-        "Data folder",
-        "Logs",
-        "Applications menu",
-    ],
+    &["Version", "Club", "Logs", "Licence", "Minecraft"],
 ];
 
 /// The settings `query` finds: (section, the row's name, or `None` when the section's own name
@@ -102,18 +59,6 @@ fn search(query: &str) -> Vec<(usize, Option<&'static str>)> {
         hits.extend(INDEX[i].iter().filter(|e| finds(e)).map(|&e| (i, Some(e))));
     }
     hits
-}
-
-/// What `settings_page` builds before it knows which look draws it.
-pub(super) struct Built {
-    pub install: Stateful<Div>,
-    pub prune: Stateful<Div>,
-    pub opening: Stateful<Div>,
-    pub menu_entry: Stateful<Div>,
-    pub horizon: String,
-    pub horizon_action: Option<AnyElement>,
-    pub launcher: String,
-    pub launcher_action: Option<AnyElement>,
 }
 
 /// A section's card (`hzl-glass rounded-[20px] p-2`).
@@ -145,34 +90,6 @@ fn section(i: usize) -> Div {
     )
 }
 
-/// A tile (the mockup's `AboutTile`, `rounded-[14px] bg-white/[0.045] p-5`): its lead, name, a
-/// line under it and what it does.
-fn tile(lead: AnyElement, title: String, note: String, action: AnyElement) -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .flex_1()
-        .min_w(px(140.))
-        .rounded(px(radius::LARGE))
-        .bg(white(0.045))
-        .border_1()
-        .border_color(white(ui::edge::REST))
-        .p(px(20.))
-        .child(div().child(lead))
-        .child(
-            ui::text(15., FontWeight::SEMIBOLD, ink::FULL)
-                .mt(px(16.))
-                .child(title),
-        )
-        .child(
-            ui::text(13., FontWeight::NORMAL, 0.6)
-                .mt(px(2.))
-                .truncate()
-                .child(note),
-        )
-        .child(div().mt(px(16.)).flex().items_start().child(action))
-}
-
 /// The scroll spy: which section is being read, given each section's top from the pane's top
 /// (`tops`, in order), the pane's `height`, how far it is `scrolled` and how far it can be (`max`).
 /// The last section whose top passed a reading line, which sits at 30 % of the pane (the mockup's)
@@ -191,22 +108,10 @@ fn spy(tops: &[f32], height: f32, scrolled: f32, max: f32) -> usize {
     tops.iter().rposition(|&top| top <= line + 0.5).unwrap_or(0)
 }
 
-fn note(s: &str) -> Option<AnyElement> {
-    Some(div().child(tr(s).to_string()).into_any_element())
-}
-
 impl Launcher {
-    pub(super) fn glass_settings(&mut self, b: Built, cx: &mut Context<Self>) -> Div {
-        if crate::glass_storage::count_now(
-            self.storage_report.is_some(),
-            self.storage_pending,
-            self.storage_error.is_some(),
-            self.storage_tried == self.storage_visit,
-        ) {
-            self.refresh_storage(None, false);
-        }
+    pub(super) fn glass_settings(&mut self, cx: &mut Context<Self>) -> Div {
         let t = self.theme;
-        let sections = ui::flat_rows(|| self.glass_settings_sections(b, cx));
+        let sections = ui::flat_rows(|| self.glass_settings_sections(cx));
         let query = self.settings_query.text().trim().to_string();
         let searching = !query.is_empty();
         let hits = search(&query);
@@ -517,132 +422,8 @@ impl Launcher {
         )
     }
 
-    /// The Game card's switch for registry mods' automatic updates (`horizon::auto`).
-    fn mods_auto_update_row(&mut self, cx: &mut Context<Self>) -> Div {
-        let t = self.theme;
-        let on = self.settings.auto_updates_mods();
-        ui::setting_row(
-            tr("Update registry mods automatically"),
-            Some(
-                div()
-                    .child(tr(
-                        "At start and before you play, content installed from Horizon's registry moves to its newest version for this game. Never inside a modpack. Code mods and updates that would remove blocks or items wait for you.",
-                    ))
-                    .into_any_element(),
-            ),
-            Some(
-                crate::switch("mods-auto-update", on, &t)
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.settings.mods_auto_update = Some(!this.settings.auto_updates_mods());
-                        this.save_settings();
-                        cx.notify();
-                    }))
-                    .into_any_element(),
-            ),
-        )
-    }
-
-    /// Updates' two tiles (the mockup's `AboutTile`s): Horizon and its update, the launcher and its
-    /// own.
-    fn update_tiles(
-        &mut self,
-        horizon: String,
-        horizon_action: Option<AnyElement>,
-        launcher: String,
-        launcher_action: Option<AnyElement>,
-    ) -> Div {
-        // Named as the Versions page names it; the exact build is on About.
-        let installed = self
-            .settings
-            .selected
-            .as_deref()
-            .map(|tag| self.version_name(tag));
-        let tone = if self.updates.horizon.is_some() {
-            ui::Tone::Accent(ui::look().accent_soft)
-        } else if self.update_error.is_some() {
-            ui::Tone::Warn
-        } else if self.checked.is_some() {
-            ui::Tone::Live
-        } else {
-            ui::Tone::Busy
-        };
-        let ink = match tone {
-            ui::Tone::Live => ui::live(),
-            ui::Tone::Warn => ui::warn(),
-            _ => white(0.7),
-        };
-        let status = div()
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .text_size(px(13.))
-            .text_color(ink)
-            .child(ui::dot(tone))
-            .child(div().min_w_0().truncate().child(horizon));
-        let launcher_mark = div()
-            .flex()
-            .items_center()
-            .justify_center()
-            .size(px(42.))
-            .rounded(px(11.))
-            .bg(white(0.08))
-            .child(ui::icon("computer", 21., white(0.8)))
-            .into_any_element();
-        let wide = self.window_width >= crate::glass_home::SIDE_BY_SIDE;
-        div()
-            .flex()
-            .when(wide, |d| d.flex_row())
-            .when(!wide, |d| d.flex_col())
-            .gap(px(8.))
-            .child(tile(
-                self.horizon_mark(42.),
-                "Horizon".into(),
-                installed.unwrap_or_else(|| tr("Nightly").to_string()),
-                div()
-                    .flex()
-                    .flex_col()
-                    .items_start()
-                    .gap(px(12.))
-                    .child(status)
-                    .children(horizon_action)
-                    .into_any_element(),
-            ))
-            .child(tile(
-                launcher_mark,
-                tr("Launcher").to_string(),
-                launcher,
-                div().children(launcher_action).into_any_element(),
-            ))
-    }
-
     /// The cards, one per entry of [`SECTIONS`], in its order.
-    fn glass_settings_sections(&mut self, b: Built, cx: &mut Context<Self>) -> Vec<Div> {
-        let t = self.theme;
-        let n = 0;
-        let account = section(2).child(self.glass_account(cx));
-        let updates = section(3)
-            .child(self.update_tiles(b.horizon, b.horizon_action, b.launcher, b.launcher_action))
-            .child(index_row(
-                0,
-                tr("Install new versions automatically"),
-                note("Your selected version only changes if you were playing the newest one."),
-                Some(b.install.into_any_element()),
-                &t,
-            ))
-            .child(index_row(
-                0,
-                tr("Delete old versions automatically"),
-                Some(
-                    div()
-                        .child(trf(
-                            "Keeps the {count} newest, the one in use and the ones your instances use. Deleted versions install again from the Versions page.",
-                            &[("count", &self.settings.keep_newest().to_string())],
-                        ))
-                        .into_any_element(),
-                ),
-                Some(b.prune.into_any_element()),
-                &t,
-            ));
+    fn glass_settings_sections(&mut self, cx: &mut Context<Self>) -> Vec<Div> {
         // No light or dark to pick: each theme is one look.
         let appearance = section(1)
             .child(self.launcher_theme_row(cx))
@@ -652,110 +433,12 @@ impl Launcher {
             .child(self.performance_row(cx))
             .child(self.motion_row(cx))
             .children(self.effects_rows(cx))
-            .child(self.home_background_row(cx))
-            .child(self.reset_look_row(cx));
-        let launcher = section(0)
+            .child(self.home_background_row(cx));
+        let general = section(0)
             .child(self.language_row(cx))
-            .child(self.while_playing_row(n, cx))
-            .child(index_row(
-                0,
-                tr("Show the Horizon logo at startup"),
-                note("Shown for a moment while the version list loads."),
-                Some(b.opening.into_any_element()),
-                &t,
-            ));
-        let network = section(5).child(self.proxy_row(n, cx));
-        let game = section(4)
-            .child(self.game_architecture_row(n, cx))
-            .child(self.game_args_row(n + 1, cx))
-            .child(self.mods_auto_update_row(cx));
-        let ai = section(8)
-            .child(self.no_ai_row(n, cx))
-            .children(self.agents_section(cx));
-        let mono = |s: String| {
-            div()
-                .font_family(theme::MONO)
-                .text_size(px(12.))
-                .child(s)
-                .into_any_element()
-        };
-        let about = section(9)
-            .child(self.version_row(&t))
-            .child(self.location_row(0, cx).mb(px(0.)))
-            .child(index_row(
-                0,
-                tr("Logs"),
-                Some(mono(format!(
-                    "{}  ·  {}",
-                    short(&backend::logs_dir()),
-                    tr("crash reports beside it")
-                ))),
-                Some(
-                    button("open-logs", "Open", Kind::Secondary, &t)
-                        .on_click(|_, _, cx| {
-                            let dir = backend::logs_dir();
-                            let _ = std::fs::create_dir_all(&dir);
-                            crate::glass_toast::open(cx, &dir);
-                        })
-                        .into_any_element(),
-                ),
-                &t,
-            ))
-            .when(cfg!(target_os = "linux"), |d| {
-                d.child(index_row(
-                    0,
-                    tr("Applications menu"),
-                    note(if self.settings.desktop_entry() {
-                        "Horizon and its icon are in your desktop's menu."
-                    } else {
-                        "Not in your desktop's menu."
-                    }),
-                    Some(b.menu_entry.into_any_element()),
-                    &t,
-                ))
-            });
-        vec![
-            launcher,
-            appearance,
-            account,
-            updates,
-            game,
-            network,
-            section(6).child(self.glass_storage(cx)),
-            section(7).child(self.collection_section(cx)),
-            ai,
-            about,
-        ]
-    }
-
-    /// About's version line, with a button that copies it (for a bug report).
-    fn version_row(&self, t: &Theme) -> Div {
-        let nightly = tr("Nightly").to_string();
-        let line = trf(
-            "Launcher {launcher}, game {game}",
-            &[
-                ("launcher", env!("CARGO_PKG_VERSION")),
-                (
-                    "game",
-                    self.settings.selected.as_deref().unwrap_or(&nightly),
-                ),
-            ],
-        )
-        .to_string();
-        let copied = line.clone();
-        index_row(
-            0,
-            tr("Version"),
-            Some(div().child(line).into_any_element()),
-            Some(
-                button("copy-version", "Copy", Kind::Secondary, t)
-                    .on_click(move |_, _, cx| {
-                        copy_to_clipboard(cx, gpui::ClipboardItem::new_string(copied.clone()))
-                    })
-                    .into_any_element(),
-            ),
-            t,
-        )
+            .child(self.while_playing_row(0, cx));
+        let about = section(2).children(self.about_rows());
+        vec![general, appearance, about]
     }
 }
 
@@ -931,9 +614,8 @@ mod search_tests {
         let look = SECTIONS.iter().position(|s| s.0 == "Appearance").unwrap();
         assert!(search("blur").contains(&(look, Some("Blur"))));
         assert!(search("APPEAR").contains(&(look, None)));
-        assert!(search("old delete")
-            .iter()
-            .any(|h| h.1 == Some("Delete old versions automatically")));
+        let about = SECTIONS.iter().position(|s| s.0 == "About").unwrap();
+        assert!(search("licence").contains(&(about, Some("Licence"))));
         assert!(search("zzzz nothing").is_empty());
         assert!(search("   ").is_empty());
     }
@@ -943,34 +625,29 @@ mod search_tests {
 mod tests {
     use super::spy;
 
-    /// A 600 px pane over the eight settings cards: tall ones, then About, too short for its
-    /// top ever to reach 30 % of the pane.
-    const TOPS: [f32; 8] = [0., 420., 700., 1000., 1300., 1600., 1900., 2200.];
+    /// A 600 px pane over the three settings cards: General, a tall Appearance, then About,
+    /// too short for its top ever to reach 30 % of the pane.
+    const TOPS: [f32; 3] = [0., 260., 1240.];
     const HEIGHT: f32 = 600.;
-    const MAX: f32 = 2400. - HEIGHT;
+    /// About is 400 px tall: the pane scrolls over 1040 px.
+    const MAX: f32 = 1640. - HEIGHT;
 
     fn at(scrolled: f32) -> usize {
         let tops: Vec<f32> = TOPS.iter().map(|t| t - scrolled).collect();
         spy(&tops, HEIGHT, scrolled, MAX)
     }
 
+    /// The reading line sits at 180 px, 30 % of the pane, until the last 420 px of scroll.
     #[test]
     fn the_list_follows_the_section_read_at_30_percent() {
         assert_eq!(at(0.), 0);
-        assert_eq!(
-            at(300.),
-            1,
-            "Updates' top is 120 px down: in the upper 30 %"
-        );
-        assert_eq!(at(600.), 2);
-        assert_eq!(
-            at(1000.),
-            3,
-            "Network's top at the pane's top, Game's 300 px down"
-        );
-        assert_eq!(at(1150.), 4, "Game's top 150 px down: in the upper 30 %");
+        // Appearance's top is at 181 px, then at 180.
+        assert_eq!(at(79.), 0);
+        assert_eq!(at(80.), 1);
     }
 
+    /// Near the end the line slides down to the pane's bottom, so About, whose top never
+    /// reaches 30 %, is marked for a stretch of scroll before the end.
     #[test]
     fn near_the_end_the_short_last_section_is_marked_for_a_stretch() {
         let seen: Vec<usize> = (0..=MAX as usize)
@@ -980,15 +657,18 @@ mod tests {
         // Every section is marked on the way down, in order, never skipped.
         let mut order = seen.clone();
         order.dedup();
-        assert_eq!(order, (0..8).collect::<Vec<_>>());
-        // About is marked for a stretch of scroll before the end, not for one step.
-        let about = seen.iter().filter(|&&s| s == 7).count();
-        assert!(about >= 8, "About marked for {about} steps of 10 px");
-        assert_eq!(at(MAX), 7);
+        assert_eq!(order, (0..3).collect::<Vec<_>>());
+        // Appearance is still marked at 830 px of scroll, About at 850.
+        assert_eq!(at(830.), 1);
+        assert_eq!(at(850.), 2);
+        let about = seen.iter().filter(|&&s| s == 2).count();
+        assert!(about >= 18, "About marked for {about} steps of 10 px");
+        assert_eq!(at(MAX), 2);
     }
 
     #[test]
     fn a_pane_that_does_not_scroll_marks_the_first() {
+        assert_eq!(spy(&[0., 260., 1240.], 600., 0., 0.), 0);
         assert_eq!(spy(&[0., 200.], 600., 0., 0.), 0);
         assert_eq!(spy(&[], 600., 0., 0.), 0);
     }

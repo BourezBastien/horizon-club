@@ -289,20 +289,25 @@ impl Game<'_> {
         // server included: its guests' chat keys are checked against them.
         let services_keys = Arc::new(std::sync::Mutex::new(ServicesKeys::Pending));
         let slot = services_keys.clone();
-        let _ = std::thread::Builder::new()
-            .name("Services keys".into())
-            .spawn(move || {
-                use horizon_server_files::profiles;
-                let keys = profiles::fetch_profile_key_keys(&profiles::discovery_url());
-                *slot.lock().unwrap_or_else(|e| e.into_inner()) = match keys {
-                    Ok(keys) if !keys.is_empty() => ServicesKeys::Ready(keys),
-                    Ok(_) => ServicesKeys::Missing,
-                    Err(why) => {
-                        log::error!("Horizon: {why}");
-                        ServicesKeys::Missing
-                    }
-                };
-            });
+        if horizon_client::managed::on() {
+            // A managed build has no account and asks no Minecraft service (crate::managed).
+            *slot.lock().unwrap_or_else(|e| e.into_inner()) = ServicesKeys::Missing;
+        } else {
+            let _ = std::thread::Builder::new()
+                .name("Services keys".into())
+                .spawn(move || {
+                    use horizon_server_files::profiles;
+                    let keys = profiles::fetch_profile_key_keys(&profiles::discovery_url());
+                    *slot.lock().unwrap_or_else(|e| e.into_inner()) = match keys {
+                        Ok(keys) if !keys.is_empty() => ServicesKeys::Ready(keys),
+                        Ok(_) => ServicesKeys::Missing,
+                        Err(why) => {
+                            log::error!("Horizon: {why}");
+                            ServicesKeys::Missing
+                        }
+                    };
+                });
+        }
         self.ui.registries.selector_tokens.clear();
         self.replay.connections += 1;
         self.remote = Some(Remote {

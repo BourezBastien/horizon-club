@@ -1,11 +1,10 @@
 //! Home's Console tab: the game's output of this run as it comes, with a search, Follow (keep the
-//! newest line in view), Copy, and Share log (`horizon_launcher::game_log`): an upload to mclo.gs
-//! that happens only after the player confirms, without their home folder or names.
+//! newest line in view) and Copy.
 use super::servers_page::Field;
 use super::*;
 use crate::scrollbar::TakeWheel;
 use gpui::ClipboardItem;
-use horizon_launcher::game_log::{self, Shared};
+use horizon_launcher::game_log;
 
 pub(super) struct Console {
     follow: bool,
@@ -21,9 +20,6 @@ pub(super) struct Console {
     /// Revision, lines shown and search at the last draw: a change means scroll down when
     /// following.
     seen: (u64, usize, String),
-    confirm_share: bool,
-    sharing: bool,
-    shared: Option<Result<Shared, String>>,
 }
 
 impl Default for Console {
@@ -36,9 +32,6 @@ impl Default for Console {
             checked: None,
             scroll: Scrollbar::default(),
             seen: (0, 0, String::new()),
-            confirm_share: false,
-            sharing: false,
-            shared: None,
         }
     }
 }
@@ -143,94 +136,14 @@ fn severity(line: &str) -> u8 {
 }
 
 impl Launcher {
-    /// What Share log sends: this run's lines, else the selected instance's latest.log.
-    fn log_to_share(&self) -> (Result<String, std::path::PathBuf>, Vec<std::path::PathBuf>) {
-        let home = self
-            .client_home
-            .clone()
-            .or_else(|| self.selected_instance().map(|i| i.home.clone()))
-            .unwrap_or_else(backend::game_home);
-        let text = match self.prepare_log.is_empty() {
-            false => Ok(self
-                .prepare_log
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>()
-                .join("\n")
-                + "\n"),
-            true => Err(home.join("logs/latest.log")),
-        };
-        (text, vec![home, backend::game_home()])
-    }
-
-    fn share_log(&mut self, cx: &mut Context<Self>) {
-        let shared = self.log_to_share();
-        self.console.confirm_share = false;
-        self.console.sharing = true;
-        let task = cx.background_executor().spawn(async move {
-            let (source, homes) = shared;
-            let text = match source {
-                Ok(text) => text,
-                Err(path) => match std::fs::read(&path) {
-                    Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-                    Err(e) => {
-                        return Err(trf(
-                            "Could not read the log: {error}",
-                            &[("error", &plain_error(&e))],
-                        )
-                        .to_string())
-                    }
-                },
-            };
-            let homes: Vec<&std::path::Path> = homes.iter().map(|h| h.as_path()).collect();
-            let names = game_log::names(&homes);
-            game_log::share(&game_log::private(
-                &text,
-                dirs::home_dir().as_deref(),
-                &names,
-            ))
-        });
-        cx.spawn(async move |this, cx| {
-            let done = task.await;
-            let _ = this.update(cx, |this, cx| {
-                this.console.sharing = false;
-                this.console.shared = Some(done);
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    fn unshare_log(&mut self, cx: &mut Context<Self>) {
-        let Some(Ok(shared)) = self.console.shared.clone() else {
-            return;
-        };
-        self.console.sharing = true;
-        let task = cx
-            .background_executor()
-            .spawn(async move { game_log::unshare(&shared) });
-        cx.spawn(async move |this, cx| {
-            let done = task.await;
-            let _ = this.update(cx, |this, cx| {
-                this.console.sharing = false;
-                this.console.shared = match done {
-                    Ok(()) => None,
-                    Err(e) => Some(Err(e)),
-                };
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
     /// Home's Console tab, once the game has said something (or is running): how many lines
     /// (beside the tabs) and the log.
     pub(super) fn console_section(&mut self, cx: &mut Context<Self>) -> Option<(Div, Div)> {
         let t = self.theme;
-        if self.prepare_log.is_empty() && self.client.is_none() {
+        if self.console_log.is_empty() && self.client.is_none() {
             return None;
         }
-        let count = self.prepare_log.len();
+        let count = self.console_log.len();
         let header = text(theme::CAPTION)
             .text_color(t.muted)
             .child(match self.client {
@@ -246,7 +159,7 @@ impl Launcher {
         let mut section = div().flex().flex_col().gap(px(10.));
         let search = self.servers.value(Field::ConsoleSearch).trim().to_string();
         let lines: Vec<String> = self
-            .prepare_log
+            .console_log
             .iter()
             .filter(|l| game_log::matches(l, &search))
             .cloned()
@@ -284,30 +197,14 @@ impl Launcher {
             .child(div().flex_1())
             .child(
                 button("console-copy", "Copy", Kind::Ghost, &t).on_click(cx.listener(
-                    move |this, _: &ClickEvent, _, cx| {
+                    move |_, _: &ClickEvent, _, cx| {
                         copy_to_clipboard(cx, ClipboardItem::new_string(copied.clone()));
-                        this.console.shared = None;
                         cx.notify();
                     },
                 )),
             )
             .child({
-                let b = button("console-share", "Share log…", Kind::Ghost, &t);
-                match self.console.sharing {
-                    true => disabled(b),
-                    false => b.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.console.confirm_share = true;
-                        cx.notify();
-                    })),
-                }
-            })
-            .child({
-                let logs = self
-                    .client_home
-                    .clone()
-                    .or_else(|| self.selected_instance().map(|i| i.home.clone()))
-                    .unwrap_or_else(backend::game_home)
-                    .join("logs");
+                let logs = backend::logs_dir();
                 button("console-folder", "Open logs folder", Kind::Ghost, &t).on_click(
                     move |_, _, cx| {
                         let _ = std::fs::create_dir_all(&logs);
@@ -316,84 +213,6 @@ impl Launcher {
                 )
             });
         section = section.child(tools);
-        if self.console.confirm_share {
-            section = section.child(
-                plate(&t)
-                    .flex()
-                    .items_center()
-                    .gap(px(12.))
-                    .px(px(14.))
-                    .py(px(10.))
-                    .child(div().flex_1().min_w_0().child(
-                        text(theme::CAPTION).text_color(t.ink_soft).child(tr(
-                            "Upload this log to mclo.gs, a paste service for Minecraft logs? \
-                             Anyone with the link can read it, until it is deleted or unread \
-                             for 90 days. Your home folder, user name and account names are \
-                             taken out first.",
-                        )),
-                    ))
-                    .child(
-                        button("console-share-no", "Cancel", Kind::Ghost, &t).on_click(
-                            cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.console.confirm_share = false;
-                                cx.notify();
-                            }),
-                        ),
-                    )
-                    .child(
-                        button("console-share-yes", "Upload", Kind::Secondary, &t).on_click(
-                            cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.share_log(cx);
-                                cx.notify();
-                            }),
-                        ),
-                    ),
-            );
-        }
-        match &self.console.shared {
-            _ if self.console.sharing => {
-                section = section.child(
-                    text(theme::CAPTION)
-                        .text_color(t.muted)
-                        .child(tr("Sending…")),
-                )
-            }
-            Some(Ok(shared)) => {
-                let (url, open_url) = (shared.url.clone(), shared.url.clone());
-                section = section.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(10.))
-                        .child(
-                            text(theme::CAPTION)
-                                .text_color(t.ink_soft)
-                                .child(trf("Shared: {url}", &[("url", &url)])),
-                        )
-                        .child(
-                            button("console-link-copy", "Copy link", Kind::Ghost, &t).on_click(
-                                move |_, _, cx| {
-                                    copy_to_clipboard(cx, ClipboardItem::new_string(url.clone()))
-                                },
-                            ),
-                        )
-                        .child(
-                            button("console-link-open", "Open", Kind::Ghost, &t)
-                                .on_click(move |_, _, cx| cx.open_url(&open_url)),
-                        )
-                        .child(
-                            button("console-unshare", "Delete it", Kind::Ghost, &t).on_click(
-                                cx.listener(|this, _: &ClickEvent, _, cx| {
-                                    this.unshare_log(cx);
-                                    cx.notify();
-                                }),
-                            ),
-                        ),
-                );
-            }
-            Some(Err(e)) => section = section.child(notice(e.clone(), &t)),
-            None => {}
-        }
         let shown = lines.len().saturating_sub(LOG_LINES);
         let body = div()
             .id("console-lines")
@@ -430,16 +249,11 @@ impl Launcher {
         use crate::glass_ui::{self as ui, white};
         use horizon_theme::glass::{ink, radius};
         let t = self.theme;
-        let logs = self
-            .client_home
-            .clone()
-            .or_else(|| self.selected_instance().map(|i| i.home.clone()))
-            .unwrap_or_else(backend::game_home)
-            .join("logs");
+        let logs = backend::logs_dir();
         let latest = logs.join("latest.log");
         // No line from this run: the last run's latest.log, its end read off the UI thread and
         // again only when it changed.
-        let from_file = self.prepare_log.is_empty() && self.client.is_none();
+        let from_file = self.console_log.is_empty() && self.client.is_none();
         if from_file {
             if self.console.file.as_ref().is_none_or(|f| f.path != latest) {
                 self.console.file = Some(FileLog {
@@ -503,7 +317,7 @@ impl Launcher {
         let source: &[String] = match tail {
             Some(Tail::Lines(lines)) => lines,
             Some(_) => &[],
-            None => self.prepare_log.make_contiguous(),
+            None => self.console_log.make_contiguous(),
         };
         let count = source.len();
         let note = match self.client {
@@ -598,15 +412,6 @@ impl Launcher {
                 });
             },
         );
-        let share = ui::quiet("console-share", tr("Share log…"), 36., &t)
-            .tooltip(ui::tip(tr("Uploads the log to mclo.gs, after you confirm")));
-        let share = match self.console.sharing {
-            true => share.opacity(0.4).cursor_default(),
-            false => share.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                this.console.confirm_share = true;
-                cx.notify();
-            })),
-        };
         let tools = div()
             .flex()
             .flex_wrap()
@@ -626,15 +431,13 @@ impl Launcher {
             .child(div().flex_1())
             .child(inert(
                 ui::quiet("console-copy", tr("Copy"), 36., &t).on_click(cx.listener(
-                    move |this, _: &ClickEvent, _, cx| {
+                    move |_, _: &ClickEvent, _, cx| {
                         copy_to_clipboard(cx, ClipboardItem::new_string(copied.clone()));
-                        this.console.shared = None;
                         cx.notify();
                     },
                 )),
                 nothing_to_act_on,
             ))
-            .child(inert(share, nothing_to_act_on))
             .child(
                 ui::icon_button(
                     "console-folder",
@@ -657,91 +460,11 @@ impl Launcher {
                         .on_click(move |_, _, cx| crate::glass_toast::open(cx, &latest)),
                 )
             });
-        let mut body = div()
+        let body = div()
             .flex()
             .flex_col()
             .child(ui::list_head(note))
             .child(tools);
-        // Share log asks first, on a card as the patch log's (white at 4 %, round at 14).
-        if self.console.confirm_share {
-            body = body.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(12.))
-                    .mx(px(12.))
-                    .mb(px(12.))
-                    .p(px(16.))
-                    .rounded(px(radius::LARGE))
-                    .bg(white(0.04))
-                    .child(div().flex_1().min_w_0().child(
-                        ui::text(13., FontWeight::NORMAL, ink::SOFT).child(tr(
-                            "Upload this log to mclo.gs, a paste service for Minecraft logs? \
-                             Anyone with the link can read it, until it is deleted or unread \
-                             for 90 days. Your home folder, user name and account names are \
-                             taken out first.",
-                        )),
-                    ))
-                    .child(
-                        ui::quiet("console-share-no", tr("Cancel"), 36., &t).on_click(cx.listener(
-                            |this, _: &ClickEvent, _, cx| {
-                                this.console.confirm_share = false;
-                                cx.notify();
-                            },
-                        )),
-                    )
-                    .child(
-                        ui::solid("console-share-yes", tr("Upload"), 36., 14., &t).on_click(
-                            cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.share_log(cx);
-                                cx.notify();
-                            }),
-                        ),
-                    ),
-            );
-        }
-        let status =
-            match &self.console.shared {
-                _ if self.console.sharing => Some(ui::list_head(tr("Sending…"))),
-                Some(Ok(shared)) => {
-                    let (url, open_url) = (shared.url.clone(), shared.url.clone());
-                    Some(
-                        ui::list_head(trf("Shared: {url}", &[("url", &shared.url)])).child(
-                            div()
-                                .flex()
-                                .gap(px(8.))
-                                .child(
-                                    ui::quiet("console-link-copy", tr("Copy link"), 36., &t)
-                                        .on_click(move |_, _, cx| {
-                                            copy_to_clipboard(
-                                                cx,
-                                                ClipboardItem::new_string(url.clone()),
-                                            )
-                                        }),
-                                )
-                                .child(
-                                    ui::quiet("console-link-open", tr("Open"), 36., &t)
-                                        .on_click(move |_, _, cx| cx.open_url(&open_url)),
-                                )
-                                .child(
-                                    ui::quiet("console-unshare", tr("Delete it"), 36., &t)
-                                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                            this.unshare_log(cx);
-                                            cx.notify();
-                                        })),
-                                ),
-                        ),
-                    )
-                }
-                Some(Err(e)) => Some(
-                    div().px(px(12.)).pb(px(8.)).child(
-                        ui::text(13., FontWeight::NORMAL, ink::FULL)
-                            .text_color(ui::danger())
-                            .child(e.clone()),
-                    ),
-                ),
-                None => None,
-            };
         let shown = lines.len().saturating_sub(LOG_LINES);
         let empty = lines.is_empty();
         let filtered = count > 0;
@@ -837,7 +560,7 @@ impl Launcher {
             .border_color(white(0.12))
             .child(bar)
             .child(log);
-        Some(body.children(status).child(terminal))
+        Some(body.child(terminal))
     }
 }
 

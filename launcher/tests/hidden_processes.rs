@@ -2,11 +2,8 @@
 #![cfg(windows)]
 
 mod support;
-use horizon_launcher::{
-    backend::{self, Job, Msg},
-    process,
-};
-use std::{fs, path::Path, sync::mpsc, time::Duration};
+use horizon_launcher::backend::{self, Msg};
+use std::{fs, io::Write, sync::mpsc, time::Duration};
 use support::console_probe as probe;
 
 fn logged_child(fail: bool) -> (Vec<String>, Result<(), String>) {
@@ -15,13 +12,14 @@ fn logged_child(fail: bool) -> (Vec<String>, Result<(), String>) {
     if fail {
         command.arg("--fail");
     }
-    let mut child = backend::spawn(Job::Prepare, command, sender).unwrap();
-    child.send("input reaches the child");
+    let mut child = backend::spawn(backend::prepare_command(command).unwrap(), sender).unwrap();
+    // The line the probe echoes back: typed into the child, as a console would.
+    writeln!(child.stdin.as_mut().unwrap(), "input reaches the child").unwrap();
     let mut lines = Vec::new();
     loop {
         match receiver.recv_timeout(Duration::from_secs(10)).unwrap() {
-            Msg::Line(Job::Prepare, line) => lines.push(line),
-            Msg::Exit(Job::Prepare, result) => return (lines, result),
+            Msg::Line(line) => lines.push(line),
+            Msg::Exit(result) => return (lines, result),
             _ => panic!("unexpected job message"),
         }
     }
@@ -72,36 +70,13 @@ fn exporters_write_to_their_log_file_without_a_console() {
 }
 
 #[test]
-fn cli_keeps_redirected_stdout_and_stderr() {
-    let executable = env!("CARGO_BIN_EXE_horizon-launcher");
-    let version = process::command(executable)
-        .arg("--version")
-        .output()
-        .unwrap();
-    assert!(version.status.success());
-    assert!(String::from_utf8_lossy(&version.stdout).starts_with("horizon-launcher "));
-    let invalid = process::command(executable)
-        .arg("--unknown-option")
-        .output()
-        .unwrap();
-    assert!(!invalid.status.success());
-    assert!(String::from_utf8_lossy(&invalid.stderr).contains("--unknown-option"));
-}
-
-#[test]
-fn mcp_keeps_its_stdio_transport() {
-    let executable = Path::new(env!("CARGO_BIN_EXE_horizon-launcher"));
-    assert!(horizon_launcher::agents::self_test(executable).unwrap() > 0);
-}
-
-#[test]
 fn desktop_executable_uses_the_windows_gui_subsystem() {
     const PE_HEADER_POINTER: usize = 0x3c;
     const PE_OPTIONAL_HEADER_OFFSET: usize = 24;
     const SUBSYSTEM_OFFSET: usize = 68;
     const WINDOWS_GUI_SUBSYSTEM: u16 = 2;
 
-    let executable = fs::read(env!("CARGO_BIN_EXE_horizon-launcher")).unwrap();
+    let executable = fs::read(env!("CARGO_BIN_EXE_HorizonClubLauncher")).unwrap();
     let header = u32::from_le_bytes(
         executable[PE_HEADER_POINTER..PE_HEADER_POINTER + 4]
             .try_into()

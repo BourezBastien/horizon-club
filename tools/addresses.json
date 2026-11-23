@@ -12,6 +12,7 @@
     "pc.realms.minecraft.net": "Realms",
     "java.frontend.realms.minecraft-services.net": "Realms",
     "piston-meta.mojang.com": "version manifests",
+    "piston-data.mojang.com": "the files the version manifests name (the game's program and its server file), as the vanilla launcher downloads them",
     "launchermeta.mojang.com": "version manifests (older address)",
     "resources.download.minecraft.net": "vanilla's assets",
     "libraries.minecraft.net": "vanilla's libraries",

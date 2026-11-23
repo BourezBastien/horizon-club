@@ -1,11 +1,11 @@
 //! Home's Worlds and Multiplayer tabs in the glass look (the mockup's `Worlds` and
 //! `Multiplayer`, `launcher-views.tsx`): one `ROW` per world or server. A world's row plays it,
 //! its size turning into "Play →" under the pointer; its ⋯ menu holds what the launcher does
-//! besides (back up, copy, data packs, folder, delete). A server's row has Join, and Remove
-//! (clicked twice) under the pointer. Dark appearance only.
+//! besides (back up, copy, folder, delete). A server's row says who is on it and has Join. Dark
+//! appearance only.
 use super::*;
 use crate::glass_ui::{self as ui, white};
-use gpui::{deferred, ExternalPaths};
+use gpui::deferred;
 use horizon_launcher::worlds::World;
 use horizon_theme::glass::{fill, ink, radius};
 use std::path::Path;
@@ -35,11 +35,10 @@ impl Launcher {
         }))
     }
 
-    /// Home's Worlds tab: the selected instance's worlds, the last played first.
-    pub(super) fn glass_worlds(&mut self, cx: &mut Context<Self>) -> Option<Div> {
+    /// Home's Worlds tab: the game's worlds, the last played first.
+    pub(super) fn glass_worlds(&mut self, cx: &mut Context<Self>) -> Div {
         let t = self.theme;
-        let home = self.selected_instance()?.home.clone();
-        self.load_worlds(home.clone(), cx);
+        self.load_worlds(cx);
         let list = self.worlds.list.clone();
         let mut body = div().flex().flex_col();
         // What the last back up, copy or delete did, where the mockup's toast would say it.
@@ -56,22 +55,20 @@ impl Launcher {
             None => {}
         }
         if list.is_empty() {
-            let saves = home.join("saves");
-            return Some(
-                body.child(
-                    ui::empty()
-                        .flex()
-                        .gap(px(4.))
-                        .child(tr(
-                            "No worlds yet. Make one in the game and it shows up here.",
-                        ))
-                        .child(ui::link("worlds-folder", tr("Open folder")).on_click(
-                            move |_, _, cx| {
-                                let _ = std::fs::create_dir_all(&saves);
-                                crate::glass_toast::open(cx, &saves);
-                            },
-                        )),
-                ),
+            let saves = backend::game_home().join("saves");
+            return body.child(
+                ui::empty()
+                    .flex()
+                    .gap(px(4.))
+                    .child(tr(
+                        "No worlds yet. Make one in the game and it shows up here.",
+                    ))
+                    .child(ui::link("worlds-folder", tr("Open folder")).on_click(
+                        move |_, _, cx| {
+                            let _ = std::fs::create_dir_all(&saves);
+                            crate::glass_toast::open(cx, &saves);
+                        },
+                    )),
             );
         }
         // Pictures line up: a world without one gets a plain tile when another has one.
@@ -93,17 +90,9 @@ impl Launcher {
             list.len(),
             0.,
             |i| kept[i],
-            |i| {
-                let w = &list[i];
-                let row = self.glass_world_row(w, pictures, cx);
-                div()
-                    .flex()
-                    .flex_col()
-                    .child(row)
-                    .children(self.world_packs_panel(w, cx))
-            },
+            |i| self.glass_world_row(&list[i], pictures, cx),
         );
-        Some(body.child(rows))
+        body.child(rows)
     }
 
     fn glass_world_row(&mut self, w: &World, pictures: bool, cx: &mut Context<Self>) -> Div {
@@ -113,7 +102,7 @@ impl Launcher {
         let menu_open = self.list_menu.as_ref().is_some_and(|(k, _)| *k == key);
         let busy = self.worlds.busy.is_some();
         let this_busy = self.worlds.busy.as_ref() == Some(&w.folder);
-        let can_play = self.can_start_selected() && !busy;
+        let can_play = self.can_start() && !busy;
         let mut facts = vec![tr(w.mode).to_string()];
         facts.extend(w.version.clone());
         facts.push(glass_home::last_played(w.last_played));
@@ -128,15 +117,6 @@ impl Launcher {
                     cx.notify();
                 }));
         }
-        // Data packs dropped on a world go into it.
-        let path = w.path.clone();
-        row = row
-            .drag_over::<ExternalPaths>(|s, _, _, _| s.bg(white(fill::SELECTED)))
-            .on_drop(cx.listener(move |this, paths: &ExternalPaths, _, cx| {
-                this.add_world_packs(path.clone(), paths.paths().to_vec());
-                cx.stop_propagation();
-                cx.notify();
-            }));
         if pictures {
             row = row.child(picture(
                 w.icon.clone().map(gpui::ImageSource::from),
@@ -154,7 +134,7 @@ impl Launcher {
                 .child(ui::icon("arrow-right-01", 15., white(ink::FULL)))
         } else {
             ui::text(13., FontWeight::NORMAL, ink::QUIET)
-                .child(horizon_launcher::storage::format_bytes(w.size))
+                .child(horizon_launcher::worlds::format_bytes(w.size))
         };
         let more = ui::icon_button(
             SharedString::from(format!("{key}-more")),
@@ -191,7 +171,7 @@ impl Launcher {
         )
     }
 
-    /// A world's ⋯ menu: Back up, Copy, its data packs, Open folder, then Delete… (asked twice).
+    /// A world's ⋯ menu: Back up, Copy, Open folder, then Delete… (asked twice).
     fn world_menu(&mut self, w: &World, cx: &mut Context<Self>) -> Stateful<Div> {
         let t = self.theme;
         let confirm = self.list_menu.as_ref().is_some_and(|(_, c)| *c);
@@ -200,13 +180,8 @@ impl Launcher {
             this.world_action(action, w.clone(), cx);
             cx.notify();
         };
-        let (backup, copy, packs, gone) = (w.clone(), w.clone(), w.clone(), w.clone());
+        let (backup, copy, gone) = (w.clone(), w.clone(), w.clone());
         let folder = w.path.clone();
-        let packs_label = if self.world_packs_open(w) {
-            tr("Hide data packs")
-        } else {
-            tr("Data packs")
-        };
         let delete = ui::menu_row(
             "world-menu-delete",
             "delete-02",
@@ -247,15 +222,6 @@ impl Launcher {
                 ),
             )
             .child(
-                ui::menu_row("world-menu-packs", "package-01", packs_label, false, &t).on_click(
-                    cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.list_menu = None;
-                        this.toggle_world_packs(&packs);
-                        cx.notify();
-                    }),
-                ),
-            )
-            .child(
                 ui::menu_row(
                     "world-menu-folder",
                     "folder-01",
@@ -272,78 +238,31 @@ impl Launcher {
             .child(div().mt(px(4.)).child(delete))
     }
 
-    /// Home's Multiplayer tab: the selected instance's saved servers (the game's own list), and
-    /// a line to add one.
-    pub(super) fn glass_multiplayer(&mut self, cx: &mut Context<Self>) -> Option<Div> {
-        let t = self.theme;
-        let instance = self.selected_instance()?;
-        let (home, name) = (instance.home.clone(), instance.name.clone());
-        self.load_servers(home);
-        self.ping_servers(cx);
+    /// Home's Multiplayer tab: the servers the club offers, each with who is on and Join.
+    pub(super) fn glass_multiplayer(&mut self, cx: &mut Context<Self>) -> Div {
+        self.load_servers(cx);
         let list = self.multiplayer.list.clone();
-        let adding = self.multiplayer.adding;
         let mut body = div().flex().flex_col();
-        if list.is_empty() && !adding {
-            return Some(
-                body.child(
-                    ui::empty()
-                        .flex()
-                        .gap(px(4.))
-                        .child(tr("No servers saved in this instance."))
-                        .child(ui::link("server-add", tr("Add server")).on_click(toggle_add(cx))),
-                ),
-            );
+        if list.is_empty() {
+            return body.child(ui::empty().flex().gap(px(4.)).child(tr(
+                "No servers to join: the club's file club.toml lists none, and no server is \
+                     hosted right now.",
+            )));
         }
         let count = list.len().to_string();
         let note = match list.len() {
-            1 => trf("1 server in {name}", &[("name", &name)]),
-            _ => trf(
-                "{count} servers in {name}",
-                &[("count", &count), ("name", &name)],
-            ),
+            1 => tr("1 server").to_string(),
+            _ => trf("{count} servers", &[("count", &count)]),
         };
-        body = body.child(
-            ui::list_head(note).child(
-                ui::quiet_icon("server-add", Some("plus-sign"), tr("Add server"), 36., &t)
-                    .on_click(toggle_add(cx)),
-            ),
-        );
+        body = body.child(ui::list_head(note));
         if let Some(e) = self.multiplayer.error.clone() {
             body = body.child(danger_line(e));
-        }
-        if adding {
-            body = body.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .px(px(12.))
-                    .pb(px(8.))
-                    .child(self.field(
-                        servers_page::Field::ServerName,
-                        "Minecraft Server",
-                        220.,
-                        cx,
-                    ))
-                    .child(self.field(
-                        servers_page::Field::ServerAddress,
-                        "play.example.com",
-                        300.,
-                        cx,
-                    ))
-                    .child(ui::solid("server-save", tr("Add"), 44., 14., &t).on_click(
-                        cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.add_server();
-                            cx.notify();
-                        }),
-                    )),
-            );
         }
         let pictures = list.iter().any(|(_, icon)| icon.is_some());
         for (i, (server, icon)) in list.into_iter().enumerate() {
             body = body.child(self.glass_server_row(i, server, icon, pictures, cx));
         }
-        Some(body)
+        body
     }
 
     fn glass_server_row(
@@ -356,34 +275,19 @@ impl Launcher {
     ) -> Stateful<Div> {
         let t = self.theme;
         let key = SharedString::from(format!("server-{i}"));
-        let hovered = self.list_hover.as_ref() == Some(&key);
-        let confirming = self.multiplayer.confirm_remove == Some(i);
-        let hover = self.list_hover_listener(key.clone(), cx);
         let ip = server.ip.clone();
-        // The mockup's dot and "address · 3 of 10", or "Offline" with Join off.
+        // The mockup's dot and "address · 3 of 10", or "address · Offline" with Join off.
         let reach = self
             .multiplayer
             .reach
             .get(&server.ip)
             .copied()
             .unwrap_or(multiplayer_page::Reach::Asking);
-        let (tone, line) = match reach {
-            multiplayer_page::Reach::Online { players, max } => (
-                ui::Tone::Live,
-                format!(
-                    "{} · {}",
-                    server.ip,
-                    trf(
-                        "{online} of {max}",
-                        &[("online", &players.to_string()), ("max", &max.to_string())]
-                    )
-                ),
-            ),
-            multiplayer_page::Reach::Offline => {
-                (ui::Tone::Off, format!("{} · {}", server.ip, tr("Offline")))
-            }
-            multiplayer_page::Reach::Asking => (ui::Tone::Off, server.ip.clone()),
+        let tone = match reach {
+            multiplayer_page::Reach::Online { .. } => ui::Tone::Live,
+            _ => ui::Tone::Off,
         };
+        let line = multiplayer_page::status(&server, reach);
         let offline = reach == multiplayer_page::Reach::Offline;
         let join = ui::quiet(
             SharedString::from(format!("{key}-join")),
@@ -391,16 +295,12 @@ impl Launcher {
             36.,
             &t,
         );
-        // Signed out, Join signs in first, as Play does; otherwise a dimmed Join says why.
-        let signed_out =
-            self.owner == Some(false) && !horizon_launcher::developer_offline::selected();
-        let join = if signed_out && !offline {
-            join.tooltip(ui::tip(tr("Sign in to join")))
-                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.sign_in_to_play();
-                    cx.notify();
-                }))
-        } else if self.can_join_selected() && !offline {
+        // A dimmed Join says why it does nothing.
+        let join = if offline {
+            join.opacity(0.4)
+                .cursor_default()
+                .tooltip(ui::tip(tr("This server doesn't answer right now")))
+        } else if self.can_start() {
             join.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 this.quick_play("--server", ip.clone());
                 cx.notify();
@@ -408,54 +308,15 @@ impl Launcher {
         } else {
             join.opacity(0.4)
                 .cursor_default()
-                .tooltip(ui::tip(tr(if offline {
-                    "This server doesn't answer right now"
-                } else {
-                    "Wait for the game to finish starting or installing"
-                })))
+                .tooltip(ui::tip(tr("Wait for the game to finish starting")))
         };
-        let remove = (hovered || confirming).then(|| {
-            if confirming {
-                danger_button(
-                    SharedString::from(format!("{key}-remove")),
-                    tr("Click again to remove").into(),
-                )
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.edit_servers(|list| list.remove(i).map(|_| ()));
-                    cx.notify();
-                }))
-                .into_any_element()
-            } else {
-                div()
-                    .child(
-                        ui::icon_button(
-                            SharedString::from(format!("{key}-delete")),
-                            "delete-02",
-                            36.,
-                            17.,
-                            radius::CONTROL,
-                            false,
-                            &t,
-                        )
-                        .tooltip(ui::tip(tr("Remove this server")))
-                        .on_click(cx.listener(
-                            move |this, _: &ClickEvent, _, cx| {
-                                this.multiplayer.confirm_remove = Some(i);
-                                cx.notify();
-                            },
-                        )),
-                    )
-                    .into_any_element()
-            }
-        });
-        ui::list_row(key, hovered || confirming, hover, &t)
+        ui::list_row(key, false, |_, _, _| {}, &t)
             .child(div().relative().flex_none().child(ui::dot(tone)))
             .when(pictures, |r| {
                 r.child(picture(icon.map(gpui::ImageSource::from), "globe-02"))
             })
             .child(ui::list_text(server.name, line))
             .child(join.relative())
-            .children(remove.map(|r| div().relative().child(r)))
     }
 }
 
@@ -470,18 +331,6 @@ fn world_menu_overlay(menu: impl IntoElement) -> impl IntoElement {
         ),
     )
     .with_priority(1)
-}
-
-/// Add server: opens or closes the line to add one, its address field focused.
-fn toggle_add(cx: &mut Context<Launcher>) -> Listener<ClickEvent> {
-    Box::new(cx.listener(|this, _: &ClickEvent, _, cx| {
-        this.multiplayer.adding = !this.multiplayer.adding;
-        this.multiplayer.error = None;
-        if this.multiplayer.adding {
-            this.servers.focus_soon = Some(servers_page::Field::ServerAddress);
-        }
-        cx.notify();
-    }))
 }
 
 /// A row's 36 px picture, or a plain tile with `fallback`'s icon.
@@ -514,31 +363,6 @@ pub(super) fn danger_line(message: String) -> Div {
             .text_color(ui::danger())
             .child(message),
     )
-}
-
-/// A destructive button's second step (the menu's "Click again to delete"): its red text on
-/// red at 12 % under the pointer.
-pub(super) fn danger_button(id: SharedString, label: SharedString) -> Stateful<Div> {
-    div()
-        .id(id)
-        .relative()
-        .flex()
-        .flex_none()
-        .items_center()
-        .h(px(36.))
-        .px(px(12.))
-        .rounded(px(radius::CONTROL))
-        .cursor_pointer()
-        .child(ui::back_tint(
-            radius::CONTROL,
-            gpui::rgba(horizon_theme::glass::DANGER_HOVER << 8 | 0x1f).into(),
-        ))
-        .child(
-            ui::text(13., FontWeight::MEDIUM, ink::FULL)
-                .relative()
-                .text_color(ui::danger())
-                .child(label),
-        )
 }
 
 #[cfg(all(test, debug_assertions))]

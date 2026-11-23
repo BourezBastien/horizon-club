@@ -257,7 +257,7 @@ impl Launcher {
     }
 
     /// A switch per flourish (`effects::Effects`): glow, gradients, the hover shine, each on or
-    /// off alone. Settings' Appearance and the first-run welcome show them.
+    /// off alone. Settings' Appearance shows them.
     pub(super) fn effects_rows(&mut self, cx: &mut Context<Self>) -> Vec<Div> {
         let t = self.theme;
         horizon_launcher::effects::Effects::LIST
@@ -669,48 +669,6 @@ impl Launcher {
         }
     }
 
-    /// Reset the look: the theme, accent, glass, blur and Home's background go back
-    /// to how Horizon ships. Language, while playing and the opening are not the look and stay.
-    pub(super) fn reset_look_row(&mut self, cx: &mut Context<Self>) -> Div {
-        let t = self.theme;
-        ui::setting_row(
-            tr("Reset the launcher's look"),
-            Some(
-                div()
-                    .child(tr(
-                        "Theme, accent colour, glass, blur and Home's background go back to how Horizon ships.",
-                    ))
-                    .into_any_element(),
-            ),
-            Some(
-                ui::quiet_icon(
-                    "look-reset",
-                    Some("refresh"),
-                    tr("Reset to defaults"),
-                    40.,
-                    &t,
-                )
-                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                    reset_look(&mut this.settings);
-                    let saved = this.save_settings();
-                    titlebar::apply_appearance(window, this.settings.appearance);
-                    this.accent_strip = false;
-                    this.background_error = None;
-                    this.theme = this.settings_theme(window);
-                    // A failed write keeps the save notice and its retry; the toast must not
-                    // claim the old look is gone for good.
-                    crate::glass_toast::say(if saved {
-                        tr("The launcher's look is back to how Horizon ships")
-                    } else {
-                        tr("The launcher's look is reset for now, but it could not be saved")
-                    });
-                    cx.notify();
-                }))
-                .into_any_element(),
-            ),
-        )
-    }
-
     /// The hex field shows the accent, except while typed in: then each whole colour typed is
     /// the accent at once, as in the mockup.
     fn sync_accent_hex(&mut self, cx: &mut Context<Self>) {
@@ -920,17 +878,6 @@ impl Launcher {
     }
 }
 
-/// The fields Reset the launcher's look puts back: the look only.
-fn reset_look(s: &mut Settings) {
-    s.appearance = Default::default();
-    s.accent = Accent::VIOLET;
-    s.theme = None;
-    s.glass = None;
-    s.blur = None;
-    s.background = None;
-    s.theme_accents.clear();
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -980,36 +927,5 @@ mod tests {
         assert!(!unused("sunrise", false));
         assert!(!unused("hypr_neon", false));
         assert!(unused("hypr_neon", true));
-    }
-
-    #[test]
-    fn reset_look_keeps_what_is_not_the_look() {
-        let mut s = Settings {
-            accent: Accent::custom(120.),
-            theme: Some("nord".into()),
-            glass: Some(3.),
-            blur: Some(9.),
-            background: Some("mine.png".into()),
-            theme_accents: [("sunrise".to_string(), Accent::TEAL)].into(),
-            reduce_motion: Some(true),
-            language: Some(i18n::Language::French),
-            skip_opening: true,
-            game_args: "-Xmx4G".into(),
-            while_playing: backend::WhilePlaying::Hide,
-            ..Default::default()
-        };
-        reset_look(&mut s);
-        assert_eq!(s.accent, Accent::VIOLET);
-        assert!(s.theme_accents.is_empty());
-        assert_eq!(
-            (s.theme, s.glass, s.blur, s.background),
-            (None, None, None, None)
-        );
-        assert_eq!(s.language, Some(i18n::Language::French));
-        assert!(s.skip_opening);
-        assert_eq!(s.game_args, "-Xmx4G");
-        assert_eq!(s.while_playing, backend::WhilePlaying::Hide);
-        // Motion is accessibility, not the look: a reset never turns it back on.
-        assert_eq!(s.reduce_motion, Some(true));
     }
 }

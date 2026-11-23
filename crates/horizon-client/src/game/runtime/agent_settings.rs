@@ -22,11 +22,18 @@ impl Game<'_> {
         if self.options.benchmark.is_some() && self.options.control.is_none() {
             return Ok(());
         }
-        if self.settings.extras.no_ai {
+        // A managed build opens no control socket for a player's game, whatever the command line
+        // and the settings say. A dedicated server keeps the one its supervisor drives it with.
+        let managed = horizon_client::managed::on() && self.options.execution_role.is_client();
+        if self.settings.extras.no_ai || managed {
             if self.options.control.is_some() {
                 log::warn!(
                     "Horizon: control socket not opened: {}",
-                    horizon_core::no_ai::REFUSAL
+                    if managed {
+                        horizon_client::managed::CONTROL_REFUSAL
+                    } else {
+                        horizon_core::no_ai::REFUSAL
+                    }
                 );
             }
             return Ok(());
@@ -66,7 +73,8 @@ impl Game<'_> {
             .control
             .as_ref()
             .is_some_and(|c| !c.path().as_os_str().is_empty());
-        if self.settings.extras.no_ai || (changed && !wanted) {
+        let managed = horizon_client::managed::on() && self.options.execution_role.is_client();
+        if self.settings.extras.no_ai || managed || (changed && !wanted) {
             if open {
                 log::info!("Horizon: control socket closed");
                 self.control = None;

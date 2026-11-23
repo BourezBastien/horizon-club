@@ -158,6 +158,8 @@ fn config() -> Config {
         minimum_segment: 4 << 10,
         read_timeout: Duration::from_millis(200),
         retries: 2,
+        // These tests fetch from a server on the loopback, which the guard exists to refuse.
+        guard: Guard::Off,
         ..Config::default()
     }
 }
@@ -465,7 +467,7 @@ async fn benchmark_download_pipeline() {
         .collect();
     let start = Instant::now();
     if mode == "parallel" {
-        Downloader::new(Config::default())
+        Downloader::new(config())
             .unwrap()
             .batch(&artifacts, &AtomicBool::new(false), &|_| {})
             .await

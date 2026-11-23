@@ -675,12 +675,13 @@ Vanilla's endpoints (engine, the same as Java Edition):
 | `textures.minecraft.net` | skins and capes | `skins.rs` |
 | `pc.realms.minecraft.net`, `java.frontend.realms.minecraft-services.net` | Realms | `realms/client.rs` |
 | `aka.ms/…` | vanilla's help links (accessibility, moderation, EULA, Realms terms), opened only on a click | `game/options.rs`, `game/screens.rs`, `ban_notice.rs`, `realms.rs`, `eula.rs` |
-| `libraries.minecraft.net`, `piston-meta.mojang.com`, `resources.download.minecraft.net` | the vanilla jars, libraries and assets | `horizon-prepare`, launcher |
+| `libraries.minecraft.net`, `piston-meta.mojang.com`, `piston-data.mojang.com`, `resources.download.minecraft.net` | the vanilla jars, libraries and assets | `horizon-prepare`, launcher |
 
 Horizon's own and third-party addresses (Horizon layer):
 
 | Address | For | Where today |
 |---|---|---|
+| `api.github.com`, `github.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com` | the school edition's releases (docs/school-edition): the launcher's updates, read and downloaded by the launcher under its GitHub guard | `horizon-addresses` (`CLUB_RELEASES`, `GITHUB_RELEASE_HOSTS`), `launcher/src/update.rs` |
 | `play.playhorizon.dev` (status `:24454`), previously `horizon.bunchy7s.dev` | the official server in the list, its status | `horizon-addresses` (#12993), `launcher/links.json` |
 | `cosmetics.playhorizon.dev` | cosmetics, emotes, presence | `horizon-addresses` (#12993) |
 | `playhorizon.dev/perf`, `playhorizon.dev/api/perf/captures` | the performance viewer Open shows a saved capture in, and the upload behind Share (`HORIZON_PERF_VIEWER`, `HORIZON_PERF_CAPTURES` override them) | `horizon-addresses`, used by `horizon-perf-share` |

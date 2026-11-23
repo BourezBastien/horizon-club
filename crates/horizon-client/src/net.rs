@@ -898,15 +898,20 @@ const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// `ConnectScreen.startConnecting`: the socket to a server, with `read_timeout`
 /// ([`READ_TIMEOUT`]) on every read. The friends relay supplies a concrete
-/// endpoint, not a Minecraft hostname, so it skips the SRV lookup. Returns the
+/// endpoint, not a Minecraft hostname, so it skips the SRV lookup; so does
+/// `pinned`, the address a managed rule checked (crate::managed). Returns the
 /// resolved host and port for `ConnectScreen`'s login handshake.
 fn connect_tcp(
     host: &str,
     port: u16,
     relayed: bool,
     read_timeout: Duration,
+    pinned: Option<std::net::SocketAddr>,
 ) -> Result<(Connection, String, u16), String> {
-    let (c, host, port) = if relayed {
+    let (c, host, port) = if let Some(addr) = pinned {
+        crate::managed::connect(addr, Duration::from_secs(10))
+            .map(|c| (c, host.to_owned(), port))
+    } else if relayed {
         Connection::connect(host, port, Duration::from_secs(10)).map(|c| (c, host.to_owned(), port))
     } else {
         Connection::connect_server_with_address(host, port, Duration::from_secs(10))
@@ -1003,9 +1008,17 @@ fn run(
                 (target.0, target.1, Vec::new())
             }
         };
-        let (mut c, host, port) =
-            connect_tcp(&host, port, address.starts_with(FRIEND), READ_TIMEOUT)
-                .map_err(Reason::plain)?;
+        // A managed rule decides where the game may connect, and names the address (crate::managed).
+        let pinned = crate::managed::pin(&host, port)
+            .map_err(|key| Reason::keyed_arg(key, lang, address))?;
+        let (mut c, host, port) = connect_tcp(
+            &host,
+            port,
+            address.starts_with(FRIEND),
+            READ_TIMEOUT,
+            pinned,
+        )
+        .map_err(Reason::plain)?;
         // The tunnel's port takes only the client that sends its token first.
         if !token.is_empty() {
             c.writer
@@ -1827,7 +1840,7 @@ pub fn load_language(resources: &std::path::Path) -> Language {
 pub fn ping(address: &str, timeout: Duration) -> Result<(serde_json::Value, u128), String> {
     use horizon_protocol::packets::status;
     let (host, port) = parse_address(address).ok_or("Invalid address")?;
-    let mut c = Connection::connect_server(&host, port, timeout).map_err(|e| e.to_string())?;
+    let mut c = crate::managed::status_connection(&host, port, timeout)?;
     c.reader
         .set_read_timeout(Some(timeout))
         .map_err(|e| e.to_string())?;
@@ -1915,7 +1928,7 @@ fn legacy_ping_request(host: &str, port: u16) -> Vec<u8> {
 /// the status handshake with the pre-1.7 ping.
 pub fn ping_legacy(address: &str, timeout: Duration) -> Result<LegacyStatus, String> {
     let (host, port) = parse_address(address).ok_or("Invalid address")?;
-    let mut c = Connection::connect_server(&host, port, timeout).map_err(|e| e.to_string())?;
+    let mut c = crate::managed::status_connection(&host, port, timeout)?;
     c.reader
         .set_read_timeout(Some(timeout))
         .map_err(|e| e.to_string())?;
@@ -2755,7 +2768,8 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let held = std::thread::spawn(move || listener.accept().map(|(stream, _)| stream));
-        let (c, _, _) = connect_tcp("127.0.0.1", port, true, Duration::from_millis(300)).unwrap();
+        let (c, _, _) =
+            connect_tcp("127.0.0.1", port, true, Duration::from_millis(300), None).unwrap();
         let _server = held.join().unwrap().unwrap();
         let (mut reader, writer) = c.split();
         let (root, data) = empty_item_data("timeout");

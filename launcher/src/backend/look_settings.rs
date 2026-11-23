@@ -51,9 +51,9 @@ mod tests {
     fn theme_accents_and_motion_survive_bad_entries() {
         let s = Settings::parse(
             r##"{"theme_accents": {"sunrise": "#c2366f", "nord": 12, "horizon": "teal"},
-                "reduce_motion": "yes", "game_args": "--x"}"##,
+                "reduce_motion": "yes", "theme": "nord"}"##,
         );
-        assert_eq!(s.game_args, "--x");
+        assert_eq!(s.theme.as_deref(), Some("nord"));
         assert_eq!(s.reduce_motion, None);
         assert_eq!(s.theme_accents.len(), 2);
         assert_eq!(s.theme_accents["horizon"], crate::themes::Accent::TEAL);
@@ -66,14 +66,13 @@ mod tests {
 
     #[test]
     fn effects_keep_their_good_flags_and_a_bad_effects_loses_nothing_else() {
-        let s =
-            Settings::parse(r#"{"effects": {"glow": false, "sheen": "no"}, "game_args": "--x"}"#);
-        assert_eq!(s.game_args, "--x");
+        let s = Settings::parse(r#"{"effects": {"glow": false, "sheen": "no"}, "theme": "nord"}"#);
+        assert_eq!(s.theme.as_deref(), Some("nord"));
         assert!(!s.effects.glow && s.effects.gradients && s.effects.sheen);
-        let s = Settings::parse(r#"{"effects": 3, "game_args": "--x"}"#);
+        let s = Settings::parse(r#"{"effects": 3, "theme": "nord"}"#);
         assert_eq!(
-            (s.game_args.as_str(), s.effects),
-            ("--x", crate::effects::Effects::ALL)
+            (s.theme.as_deref(), s.effects),
+            (Some("nord"), crate::effects::Effects::ALL)
         );
     }
 }

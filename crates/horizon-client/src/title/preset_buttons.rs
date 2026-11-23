@@ -21,6 +21,7 @@ impl Title {
             Mode::Main => {
                 let cx = (w / 2.0).floor();
                 let y = (h / 4.0).floor() + 48.0;
+                let managed = crate::managed::on();
                 let mut buttons = vec![
                     b(
                         cx - 100.0,
@@ -38,16 +39,20 @@ impl Title {
                         self.allows_multiplayer,
                         4,
                     ),
-                    b(
+                ];
+                // TitleScreen.createNormalMenuOptions: Realms is off when
+                // multiplayer is. A managed build has no account for it (crate::managed).
+                if !managed {
+                    buttons.push(b(
                         cx - 100.0,
                         y + 48.0,
                         200.0,
                         &lang::get_or("menu.online", "Minecraft Realms"),
-                        // TitleScreen.createNormalMenuOptions: Realms is off when
-                        // multiplayer is.
                         self.allows_multiplayer,
                         8,
-                    ),
+                    ));
+                }
+                buttons.extend([
                     b(
                         cx - 100.0,
                         y + 96.0,
@@ -66,10 +71,11 @@ impl Title {
                         2,
                     )
                     .does(crate::widgets::Action::Exit),
-                ];
+                ]);
                 // CommonButtons' icon buttons; Horizon's Join a Friend (an
-                // invite code) sits behind vanilla's Friends button.
-                for (i, (key, plain, id, icon)) in [
+                // invite code) sits behind vanilla's Friends button. A managed
+                // build keeps only vanilla's two (crate::managed).
+                let icons: Vec<_> = [
                     ("horizon.mods.screen.title", "Mods", 9, "icon/mods"),
                     ("gui.friends.open", "Friends", 5, "friends/friends"),
                     ("options.language", "Language...", 6, "icon/language"),
@@ -81,10 +87,13 @@ impl Title {
                     ),
                 ]
                 .into_iter()
-                .enumerate()
-                {
+                .filter(|(_, _, id, _)| !managed || matches!(id, 6 | 7))
+                .collect();
+                // The row is centred on the title: 20 wide, 4 apart.
+                let first = cx - (24.0 * (icons.len() as f32 - 1.0) + 20.0) / 2.0;
+                for (i, (key, plain, id, icon)) in icons.into_iter().enumerate() {
                     let mut button = b(
-                        cx - 46.0 + i as f32 * 24.0,
+                        first + i as f32 * 24.0,
                         y + 72.0,
                         20.0,
                         &lang::get_or(key, plain),

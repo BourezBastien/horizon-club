@@ -1299,6 +1299,10 @@ impl Game<'_> {
                 "horizon.developer_offline.single_player",
             ));
         }
+        // A managed rule says whether a world may be opened to the LAN (crate::managed).
+        if !horizon_client::managed::lan() {
+            return Err(horizon_client::lang::get("horizon.managed.no_lan"));
+        }
         let Some(s) = self.serving.as_mut() else {
             return Err("not an integrated server".into());
         };

@@ -1,7 +1,6 @@
-//! The look's flourishes, each switched on or off on its own (Settings > Appearance, and the
-//! first-run welcome). Plain data: the backend keeps it in `Settings`; the window reads it as
-//! each frame starts and every drawing of a flourish asks for its own flag, so one can go
-//! without touching the others.
+//! The look's flourishes, each switched on or off on its own (Settings > Appearance). Plain
+//! data: the backend keeps it in `Settings`; the window reads it as each frame starts and every
+//! drawing of a flourish asks for its own flag, so one can go without touching the others.
 
 use serde::{Deserialize, Serialize};
 

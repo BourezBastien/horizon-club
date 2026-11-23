@@ -54,15 +54,6 @@ pub fn paper() -> Hsla {
     }
 }
 
-/// Text on [`paper`].
-pub fn on_paper() -> Hsla {
-    if light() {
-        gpui::white()
-    } else {
-        color(INK)
-    }
-}
-
 /// The look's green (`--live`): darker in light, to read on white plates.
 pub fn live() -> Hsla {
     color(if light() {
@@ -185,23 +176,6 @@ pub fn setting_row_stacked(
         .child(div().w_full().child(control))
 }
 
-/// The mockup's `WIDE_FIELD` look on a field built for the old one: 44 px, up to 560 px wide,
-/// 12 px corners, white at 7 % (11 % while typed in), 14 px Geist.
-pub fn wide_field(field: Stateful<Div>, focused: bool) -> Stateful<Div> {
-    field
-        .w_full()
-        .max_w(px(560.))
-        .h(px(44.))
-        .px(px(16.))
-        .border_0()
-        .rounded(px(radius::ROW))
-        .bg(white(if focused { 0.11 } else { 0.07 }))
-        .font_family(horizon_theme::glass::FONT)
-        .text_size(px(14.))
-        .relative()
-        .when(focused, |d| d.child(focus_ring(radius::ROW)))
-}
-
 /// The mockup's focus ring (`.hzl :focus-visible`: 2 px of the accent's soft shade) over a
 /// focused field, inside its edge with the field's corners: GPUI has no outline, and a field
 /// clips what lies outside it. Put it in a `relative` field round at `radius`.
@@ -292,52 +266,6 @@ pub fn text(size: f32, weight: FontWeight, a: f32) -> Div {
         .line_height(px((size * 1.4).round()))
         .font_weight(weight)
         .text_color(white(a))
-}
-
-/// The widths text was laid out in, by key, as [`room`] recorded them on the last frame: what
-/// [`cut`] compares a text's own width against.
-pub type Rooms = Rc<RefCell<HashMap<SharedString, f32>>>;
-
-/// Fills its (relative) parent and records the parent's laid-out width in `rooms` under `key`.
-pub fn room(rooms: &Rooms, key: SharedString) -> impl IntoElement {
-    let rooms = rooms.clone();
-    gpui::canvas(
-        move |bounds, _, _| {
-            rooms.borrow_mut().insert(key, f32::from(bounds.size.width));
-        },
-        |_, _, _, _| {},
-    )
-    .absolute()
-    .top_0()
-    .left_0()
-    .size_full()
-}
-
-/// Whether `text` in `family` at `size` and `weight` is wider than the room recorded under `key`,
-/// so a truncating parent cuts it: decides a full-text hover label. False until a room is known.
-pub fn cut(
-    cx: &App,
-    rooms: &Rooms,
-    key: &str,
-    text: &str,
-    family: &'static str,
-    size: f32,
-    weight: FontWeight,
-) -> bool {
-    let Some(room) = rooms.borrow().get(key).copied() else {
-        return false;
-    };
-    let system = cx.text_system();
-    let font = system.resolve_font(&gpui::Font {
-        weight,
-        ..gpui::font(family)
-    });
-    let width: f32 = text
-        .chars()
-        .filter_map(|c| system.advance(font, px(size), c).ok())
-        .map(|a| f32::from(a.width))
-        .sum();
-    width > room + 0.5
 }
 
 /// One of the mockup's Hugeicons, stroked in `color`.
@@ -609,24 +537,7 @@ pub fn dot(tone: Tone) -> Div {
     div().flex_none().size(px(7.)).rounded_full().bg(c)
 }
 
-/// The progress bar (`Bar`): 4 px, white at 12 %, filled in the accent's soft shade.
-pub fn bar(value: f32, accent_soft: u32) -> Div {
-    div()
-        .h(px(4.))
-        .w_full()
-        .rounded_full()
-        .overflow_hidden()
-        .bg(white(fill::ACTIVE))
-        .child(
-            div()
-                .h_full()
-                .rounded_full()
-                .w(gpui::relative(value.clamp(0., 1.)))
-                .bg(color(accent_soft)),
-        )
-}
-
-/// A sidebar row (an instance, a server): `rounded-[12px] p-2`, white at 10 % when it is the one
+/// A sidebar row (the game, a server): `rounded-[12px] p-2`, white at 10 % when it is the one
 /// shown, 5 % under the pointer. Its icon and lines go in as children; `pr` leaves room for a
 /// button laid over its right end.
 pub fn row(id: impl Into<SharedString>, current: bool, pr: f32, t: &Theme) -> Stateful<Div> {
@@ -929,82 +840,6 @@ pub fn dialog_plate(radius: f32) -> Div {
             color(horizon_theme::glass::SCRIM).opacity(if light() { 0. } else { 0.5 }),
         ))
         .child(layer(white(horizon_theme::glass::TINT)))
-}
-
-/// Text on a white button (`SOLID`): `#100a1f`, medium.
-pub fn solid(
-    id: impl Into<SharedString>,
-    label: impl Into<SharedString>,
-    h: f32,
-    size: f32,
-    t: &Theme,
-) -> Stateful<Div> {
-    let id = id.into();
-    keyboard(
-        div()
-            .id(id)
-            .flex()
-            .flex_none()
-            .items_center()
-            .justify_center()
-            .gap(px(8.))
-            // `h` is the least height: a label that wraps in a narrow button (a long translation)
-            // grows it instead of spilling out of it.
-            .min_h(px(h))
-            .py(px(4.))
-            .px(px(16.))
-            .rounded(px(radius::CONTROL))
-            .text_center()
-            .bg(paper())
-            .border_1()
-            .border_color(white(edge::REST))
-            .cursor_pointer()
-            .hover(|s| {
-                s.opacity(0.94).shadow(vec![gpui::BoxShadow {
-                    color: gpui::black().opacity(0.25),
-                    offset: gpui::point(px(0.), px(4.)),
-                    blur_radius: px(14.),
-                    spread_radius: px(0.),
-                    inset: false,
-                }])
-            })
-            .active(|s| s.opacity(0.85))
-            .font_family(horizon_theme::glass::FONT)
-            .text_size(px(size))
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(on_paper())
-            .child(label.into()),
-        t,
-    )
-}
-
-/// A big square button with one icon (`BIG_ICON`): 56 px, white at 8 %, 13 % under the pointer;
-/// the glyph white at 80 %, white under the pointer.
-pub fn big_icon(id: impl Into<SharedString>, name: &'static str, t: &Theme) -> Stateful<Div> {
-    let id = id.into();
-    let group = SharedString::from(format!("{id}-group"));
-    let glyph = icon(name, 21., white(ink::STRONG))
-        .group_hover(group.clone(), |s| s.text_color(white(ink::FULL)));
-    keyboard(
-        div()
-            .id(id)
-            .group(group)
-            .relative()
-            .flex()
-            .flex_none()
-            .items_center()
-            .justify_center()
-            .size(px(56.))
-            .rounded(px(radius::LARGE))
-            .bg(white(fill::BUTTON))
-            .border_1()
-            .border_color(white(edge::REST))
-            .active(|s| s.bg(white(0.18)))
-            .cursor_pointer()
-            .child(back_edge(radius::LARGE, 0.05, true))
-            .child(glyph.relative()),
-        t,
-    )
 }
 
 /// A menu row with a note under its label (`MENU_ITEM`): 14 px medium over 12 px at 55 %, white

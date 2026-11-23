@@ -23,10 +23,9 @@ pub use tokens::{CONTROL_LARGE, DISABLED, FIELD, PRESSED, RISE, ROW, SEGMENT};
 
 /// Blocks have square corners: these stay for the places that ask for a radius.
 pub const RADIUS: f32 = 0.;
-pub const RADIUS_PLATE: f32 = 0.;
 /// Buttons are a little taller than the quiet look's, for their lip.
 pub const CONTROL: f32 = 34.;
-/// The top bar, and the sidebar of instances and servers.
+/// The top bar, and the sidebar of the game and the servers.
 pub const TOPBAR: f32 = 56.;
 pub const SIDEBAR: f32 = 248.;
 pub const PAGE_GUTTER: f32 = 32.;
@@ -53,7 +52,6 @@ pub struct Theme {
     pub ink_soft: Hsla,
     pub muted: Hsla,
     pub accent: Hsla,
-    pub on_accent: Hsla,
     pub danger: Hsla,
     pub success: Hsla,
     pub warn: Hsla,
@@ -261,7 +259,6 @@ impl Theme {
             ink_soft: white(ink::SOFT),
             muted: white(ink::QUIET),
             accent: c(look.accent_soft),
-            on_accent: c(look.on_accent),
             // Light: `glass_ui::danger`, `live` and `warn`'s darker shades.
             danger: c(if dark { DANGER } else { 0xdc2626 }),
             success: c(if dark { LIVE } else { 0x15803d }),
@@ -297,7 +294,6 @@ impl Theme {
             ink_soft: c(p.ink_soft),
             muted: c(p.muted),
             accent: c(p.accent),
-            on_accent: c(p.on_face),
             danger: c(p.danger),
             success: c(p.success),
             warn: c(p.warn),

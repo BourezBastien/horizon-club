@@ -252,7 +252,8 @@ impl Game<'_> {
     pub(super) fn refresh_pack_lists(&mut self) {
         let infos = self.resource_pack_infos();
         let configs = pack_configs(&self.vanilla_root());
-        let browsing = self.settings.extras.pack_browser;
+        // A managed build has no pack browser: nothing downloads (crate::managed).
+        let browsing = self.settings.extras.pack_browser && !horizon_client::managed::on();
         let o = &mut self.ui.options;
         o.pack_browser = browsing;
         o.pack_infos = infos;

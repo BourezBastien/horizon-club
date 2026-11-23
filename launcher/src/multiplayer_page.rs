@@ -1,29 +1,21 @@
-//! The selected instance's server list on Home (`horizon_launcher::server_list`, the game's own
-//! `servers.dat`): each server with the picture the game last saw, Join (the game starts straight
-//! into it), Remove after a confirmation, and a line to add one. The official server is put on top
-//! once, as the game does, at the address links.json gives (`server_list::add_official`).
+//! Home's Multiplayer tab (`multiplayer_page.rs`): the servers the club offers, as the game's own
+//! list holds them (`horizon_launcher::server_list`): those of `club.toml`, then the hosted servers
+//! announced on the network. Each with who is on it, as the game's Multiplayer screen asks when it
+//! opens, and Join: the game starts straight into it. A student adds none and removes none: the
+//! list is written again from the club's file whenever the tab refreshes.
 use super::*;
 use gpui::{Image, ImageFormat};
 use horizon_launcher::server_list::{self, Server};
-use servers_page::Field;
+use horizon_launcher::server_status::{self, TIMEOUT};
+use horizon_launcher::{club, online};
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 
-#[derive(Default)]
-pub(super) struct Multiplayer {
-    /// The game folder the list is of, and the list as last read with each picture decoded.
-    home: Option<PathBuf>,
-    pub(super) list: Vec<(Server, Option<Arc<Image>>)>,
-    fresh: bool,
-    pub(super) adding: bool,
-    pub(super) confirm_remove: Option<usize>,
-    pub(super) error: Option<String>,
-    /// What each address answered to the status ping, asked once per list.
-    pub(super) reach: HashMap<String, Reach>,
-}
+/// How long the tab's list stands before it is written again while the tab shows: the announced
+/// servers come and go.
+const REFRESH: Duration = Duration::from_secs(5);
 
-/// A saved server as its status ping found it.
+/// A server as its status ping found it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum Reach {
     Asking,
@@ -31,22 +23,105 @@ pub(super) enum Reach {
     Offline,
 }
 
+#[derive(Default)]
+pub(super) struct Multiplayer {
+    /// The list as last written, with each picture the game last saw.
+    pub(super) list: Vec<(Server, Option<Arc<Image>>)>,
+    /// Written again on the next frame: the game ended, or the list could not be saved.
+    fresh: bool,
+    /// When the list was last written.
+    written: Option<Instant>,
+    /// What each address answered to the status ping, asked once per list.
+    pub(super) reach: HashMap<String, Reach>,
+    /// Why the list could not be saved, when it couldn't.
+    pub(super) error: Option<String>,
+}
+
 impl Multiplayer {
-    /// Read again on the next frame: the game may have changed its list.
+    /// Write the list again on the next frame: the game may have written what it saw of the
+    /// servers.
     pub(super) fn stale(&mut self) {
         self.fresh = false;
     }
 }
 
+/// A row's line under the server's name: its address, and who is on once it answered.
+pub(super) fn status(server: &Server, reach: Reach) -> String {
+    match reach {
+        Reach::Online { players, max } => format!(
+            "{} · {}",
+            server.ip,
+            trf(
+                "{online} of {max}",
+                &[("online", &players.to_string()), ("max", &max.to_string())]
+            )
+        ),
+        Reach::Offline => format!("{} · {}", server.ip, tr("Offline")),
+        Reach::Asking => server.ip.clone(),
+    }
+}
+
 impl Launcher {
-    /// Asks each listed server for its players once, as the game's Multiplayer list does when it
-    /// opens; the rows show the answer (the mockup's dot and "3 of 10" or "Offline").
+    /// Writes the game's server list again when it is stale or [`REFRESH`] old, and reads it back:
+    /// the tab's rows and its count. While a game runs the list is the game's own: nothing is
+    /// written. Whether what keeps the game from starting changed meanwhile (the club's file is
+    /// read again with the list), for a page that reads it as it draws.
+    pub(super) fn refresh_servers(&mut self) -> bool {
+        if self.client.is_some() {
+            return false;
+        }
+        let due = self
+            .multiplayer
+            .written
+            .is_none_or(|at| at.elapsed() >= REFRESH);
+        if self.multiplayer.fresh && !due {
+            return false;
+        }
+        // The club's file is read again with the list, so a server the supervisor added shows
+        // here without restarting the launcher.
+        let changed = self.reload_club();
+        let announced = online::list(&club::online_dir(), server_list::now());
+        match server_list::write_club_list(&backend::game_home(), &self.config, &announced) {
+            Ok(servers) => {
+                self.multiplayer.list = servers
+                    .into_iter()
+                    .map(|mut server| {
+                        let icon = server
+                            .icon
+                            .take()
+                            .map(|png| Arc::new(Image::from_bytes(ImageFormat::Png, png)));
+                        (server, icon)
+                    })
+                    .collect();
+                self.multiplayer.error = None;
+            }
+            // The list as last written stays on screen, and the line says why it is old.
+            Err(error) => self.multiplayer.error = Some(error),
+        }
+        self.multiplayer.fresh = true;
+        self.multiplayer.written = Some(Instant::now());
+        // Each server is asked again for the new list.
+        self.multiplayer.reach.clear();
+        changed
+    }
+
+    /// The tab's list, and who is on each of its servers.
+    pub(super) fn load_servers(&mut self, cx: &mut Context<Self>) {
+        let changed = self.refresh_servers();
+        self.ping_servers(cx);
+        if changed {
+            cx.notify();
+        }
+    }
+
+    /// Asks each listed server for its players once per list, as the game's Multiplayer list does
+    /// when it opens; the rows show the answer (a dot and "3 of 10", or "Offline").
     pub(super) fn ping_servers(&mut self, cx: &mut Context<Self>) {
         let asks: Vec<String> = self
             .multiplayer
             .list
             .iter()
-            .map(|(s, _)| s.ip.clone())
+            .map(|(server, _)| server.ip.clone())
             .filter(|ip| !self.multiplayer.reach.contains_key(ip))
             .collect();
         for ip in asks {
@@ -54,16 +129,16 @@ impl Launcher {
             let address = ip.clone();
             let task = cx
                 .background_executor()
-                .spawn(async move { horizon_launcher::telemetry::server_players(&address) });
+                .spawn(async move { server_status::players(&address, TIMEOUT) });
             cx.spawn(async move |this, cx| {
                 let answer = task.await;
                 let _ = this.update(cx, |this, cx| {
                     let reach = match answer {
-                        Some(p) => Reach::Online {
-                            players: p.online,
-                            max: p.max,
+                        Ok(players) => Reach::Online {
+                            players: players.online,
+                            max: players.max,
                         },
-                        None => Reach::Offline,
+                        Err(_) => Reach::Offline,
                     };
                     this.multiplayer.reach.insert(ip, reach);
                     cx.notify();
@@ -73,119 +148,28 @@ impl Launcher {
         }
     }
 
-    pub(super) fn load_servers(&mut self, home: PathBuf) {
-        if self.multiplayer.home.as_ref() != Some(&home) {
-            self.multiplayer = Multiplayer {
-                home: Some(home.clone()),
-                ..Multiplayer::default()
-            };
-        }
-        if self.multiplayer.fresh {
-            return;
-        }
-        // A list that can't be read is the game's to report: the page shows it empty.
-        let _ = server_list::add_official(
-            &home,
-            &self.links.official_server,
-            &self.links.official_server_previous,
-        );
-        // A few servers and their 64×64 pictures: small enough to read while drawing.
-        self.multiplayer.list = server_list::List::load(&home)
-            .servers()
-            .into_iter()
-            .map(|s| {
-                let icon = s
-                    .icon
-                    .clone()
-                    .map(|png| Arc::new(Image::from_bytes(ImageFormat::Png, png)));
-                (s, icon)
-            })
-            .collect();
-        self.multiplayer.fresh = true;
-    }
-
-    pub(super) fn edit_servers(
-        &mut self,
-        edit: impl FnOnce(&mut server_list::List) -> Result<(), String>,
-    ) {
-        let Some(home) = self.multiplayer.home.clone() else {
-            return;
-        };
-        let mut list = server_list::List::load(&home);
-        self.multiplayer.error = edit(&mut list).and_then(|()| list.save(&home)).err();
-        self.multiplayer.confirm_remove = None;
-        self.multiplayer.stale();
-    }
-
-    /// Enter in the address field, or Add.
-    pub(super) fn add_server(&mut self) {
-        let name = self.servers.value(Field::ServerName).to_string();
-        let address = self.servers.value(Field::ServerAddress).to_string();
-        self.edit_servers(|list| list.add(&name, &address));
-        if self.multiplayer.error.is_none() {
-            self.servers.text(Field::ServerName).set(String::new());
-            self.servers.text(Field::ServerAddress).set(String::new());
-            self.multiplayer.adding = false;
-        }
-    }
-
-    /// How many servers the selected instance's list has.
-    pub(super) fn servers_count(&mut self) -> usize {
-        let Some(home) = self.selected_instance().map(|i| i.home.clone()) else {
-            return 0;
-        };
-        self.load_servers(home);
-        self.multiplayer.list.len()
-    }
-
-    /// Home's Multiplayer tab, for the selected instance: its button (beside the tabs) and its
-    /// list.
-    pub(super) fn multiplayer_section(&mut self, cx: &mut Context<Self>) -> Option<(Div, Div)> {
+    /// Home's Multiplayer tab: its list, and nothing beside the tabs (a student adds no server).
+    pub(super) fn multiplayer_section(&mut self, cx: &mut Context<Self>) -> (Div, Div) {
         let t = self.theme;
-        let home = self.selected_instance()?.home.clone();
-        self.load_servers(home);
-        let actions = div().child(tab_action("server-add", "Add server", &t).on_click(
-            cx.listener(|this, _: &ClickEvent, _, cx| {
-                this.multiplayer.adding = !this.multiplayer.adding;
-                this.multiplayer.error = None;
-                if this.multiplayer.adding {
-                    this.servers.focus_soon = Some(Field::ServerAddress);
-                }
-                cx.notify();
-            }),
-        ));
+        self.load_servers(cx);
         let mut section = div().flex().flex_col().gap(px(8.));
         if let Some(e) = self.multiplayer.error.clone() {
             section = section.child(notice(e, &t));
         }
-        if self.multiplayer.adding {
-            section = section.child(
-                plate(&t)
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .px(px(14.))
-                    .py(px(10.))
-                    .child(self.field(Field::ServerName, tr("Minecraft Server"), 220., cx))
-                    .child(self.field(Field::ServerAddress, "play.example.com", 300., cx))
-                    .child(button("server-save", "Add", Kind::Secondary, &t).on_click(
-                        cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.add_server();
-                            cx.notify();
-                        }),
-                    )),
-            );
-        }
         let list = self.multiplayer.list.clone();
-        if list.is_empty() && !self.multiplayer.adding {
-            section = section.child(text(theme::CAPTION).text_color(t.muted).child(tr(
-                "No servers yet: add one here or in the game's Multiplayer screen.",
-            )));
+        if list.is_empty() {
+            return (
+                div(),
+                section.child(text(theme::CAPTION).text_color(t.muted).child(tr(
+                    "No servers to join: the club's file club.toml lists none, and no server is \
+                     hosted right now.",
+                ))),
+            );
         }
         for (i, (server, icon)) in list.into_iter().enumerate() {
             section = section.child(self.server_row(i, server, icon, cx));
         }
-        Some((actions, section))
+        (div(), section)
     }
 
     fn server_row(
@@ -196,6 +180,13 @@ impl Launcher {
         cx: &mut Context<Self>,
     ) -> Div {
         let t = self.theme;
+        let reach = self
+            .multiplayer
+            .reach
+            .get(&server.ip)
+            .copied()
+            .unwrap_or(Reach::Asking);
+        let offline = reach == Reach::Offline;
         let picture = div()
             .flex()
             .flex_none()
@@ -209,72 +200,22 @@ impl Launcher {
             Some(image) => picture.child(gpui::img(image).size(px(44.))),
             None => picture.child(blocks::icon("server", 22., t.muted)),
         };
-        let mut actions = div().flex().items_center().gap(px(6.));
-        if self.multiplayer.confirm_remove == Some(i) {
-            actions = actions
-                .child(
-                    text(theme::CAPTION)
-                        .text_color(t.danger)
-                        .child(tr("Remove it from the list?")),
-                )
-                .child(
-                    button(
-                        SharedString::from(format!("server-keep-{i}")),
-                        "Keep",
-                        Kind::Ghost,
-                        &t,
-                    )
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.multiplayer.confirm_remove = None;
-                        cx.notify();
-                    })),
-                )
-                .child(
-                    button(
-                        SharedString::from(format!("server-remove-{i}")),
-                        "Remove",
-                        Kind::Secondary,
-                        &t,
-                    )
-                    .on_click(cx.listener(
-                        move |this, _: &ClickEvent, _, cx| {
-                            this.edit_servers(|list| list.remove(i).map(|_| ()));
-                            cx.notify();
-                        },
-                    )),
-                );
+        // Offline, Join does nothing: the game would only wait for a server that isn't there.
+        let join = button(
+            SharedString::from(format!("server-join-{i}")),
+            "Join",
+            Kind::Secondary,
+            &t,
+        );
+        let join = if offline || !self.can_start() {
+            disabled(join)
         } else {
             let ip = server.ip.clone();
-            let busy = !self.can_join_selected();
-            let join = button(
-                SharedString::from(format!("server-join-{i}")),
-                "Join",
-                Kind::Secondary,
-                &t,
-            );
-            let join = if busy { disabled(join) } else { join };
-            actions = actions
-                .child(
-                    join.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.quick_play("--server", ip.clone());
-                        cx.notify();
-                    })),
-                )
-                .child(
-                    button(
-                        SharedString::from(format!("server-delete-{i}")),
-                        "Remove",
-                        Kind::Ghost,
-                        &t,
-                    )
-                    .on_click(cx.listener(
-                        move |this, _: &ClickEvent, _, cx| {
-                            this.multiplayer.confirm_remove = Some(i);
-                            cx.notify();
-                        },
-                    )),
-                );
-        }
+            join.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.quick_play("--server", ip.clone());
+                cx.notify();
+            }))
+        };
         plate(&t)
             .flex()
             .items_center()
@@ -296,11 +237,35 @@ impl Launcher {
                     )
                     .child(
                         text(theme::CAPTION)
-                            .text_color(t.muted)
+                            .text_color(if offline { t.muted } else { t.success })
                             .truncate()
-                            .child(server.ip.clone()),
+                            .child(status(&server, reach)),
                     ),
             )
-            .child(actions)
+            .child(div().flex().items_center().child(join))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A row says the address alone until the server answers, then who is on, or that nobody
+    /// does.
+    #[test]
+    fn a_row_shows_who_is_on_the_server_once_it_answered() {
+        let server = Server::new("Serveur du club", "mc-club:25565");
+        assert_eq!(status(&server, Reach::Asking), "mc-club:25565");
+        assert_eq!(
+            status(
+                &server,
+                Reach::Online {
+                    players: 3,
+                    max: 10
+                }
+            ),
+            "mc-club:25565 · 3 of 10"
+        );
+        assert_eq!(status(&server, Reach::Offline), "mc-club:25565 · Offline");
     }
 }

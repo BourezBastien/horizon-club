@@ -13,7 +13,6 @@ fn folder_names_are_plain() {
     assert_eq!(slug("Ludo's Survival!"), "ludo-s-survival");
     assert_eq!(slug("  "), "server");
     assert_eq!(slug("Été 2026"), "t-2026");
-    assert_eq!(service_suffix(Path::new("/x/My World")), "my-world");
 }
 
 #[test]
@@ -24,13 +23,11 @@ fn create_asks_init_and_config_set() {
             seed: " 12345 ".into(),
         },
         players: vec!["Alex".into(), "Steve".into()],
-        eula: true,
-        check_accounts: false,
         ..NewServer::default()
     };
     assert_eq!(
         init_args(&spec, "world", 25566).join(" "),
-        "init --yes --eula --world world --seed 12345 --port 25566 --whitelist --offline \
+        "init --yes --eula --offline --world world --seed 12345 --port 25566 --whitelist \
          --player Alex --player Steve --op Alex"
     );
     let open = NewServer {
@@ -40,228 +37,66 @@ fn create_asks_init_and_config_set() {
     };
     assert_eq!(
         init_args(&open, "old", 25565).join(" "),
-        "init --yes --world old --port 25565 --no-whitelist"
+        "init --yes --eula --offline --world old --port 25565 --no-whitelist"
     );
-    assert_eq!(
-        settings_args(&spec, 8131).join(" "),
-        "config set world.game_mode=survival world.difficulty=normal server.max_players=10 \
-         server.motd=Friends panel.bind=127.0.0.1:8131"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn programs_are_laid_out_as_install_sh_does() {
-    let root = scratch("runtime");
-    let version = root.join("versions/v1");
-    fs::create_dir_all(version.join(".local/horizon-client/26.3")).unwrap();
-    fs::write(version.join(PROGRAM), "server").unwrap();
-    fs::write(version.join("horizon-client"), "game").unwrap();
-    fs::write(version.join(".installed"), "").unwrap();
-    crate::game_app::ensure(&version).unwrap();
-    fs::write(
-        version.join(".local/horizon-client/26.3/horizon-resources.json"),
-        "{}",
-    )
-    .unwrap();
-    let rt = root.join("runtime");
-    set_up_in(&rt, &version, "v1", "26.3").unwrap();
-    assert_eq!(
-        fs::read_to_string(rt.join("current").join(PROGRAM)).unwrap(),
-        "server"
-    );
-    // The release is an installation the game runs from: it carries the completion marker, empty.
-    let marker = rt.join("releases/v1/.installed");
-    assert!(marker.is_file());
-    assert_eq!(fs::metadata(&marker).unwrap().len(), 0);
-    // The game's macOS bundle is the launcher's, not the server's.
-    assert!(!rt.join("releases/v1/Horizon.app").exists());
-    // The release finds the game files where horizon-server looks: .local beside it.
-    assert!(rt
-        .join("current/.local/horizon-client/26.3/horizon-resources.json")
-        .is_file());
-    // Again with newer game files: only they change, swapped in whole.
-    fs::write(
-        version.join(".local/horizon-client/26.3/horizon-resources.json"),
-        "{\"new\":1}",
-    )
-    .unwrap();
-    set_up_in(&rt, &version, "v1", "26.3").unwrap();
-    assert_eq!(
-        fs::read_to_string(game_files(&rt, "26.3").join("horizon-resources.json")).unwrap(),
-        "{\"new\":1}"
-    );
-    assert!(!game_files(&rt, "26.3").with_extension("old").exists());
-    fs::remove_dir_all(&root).unwrap();
-}
-
-#[test]
-fn a_release_carries_the_completion_marker_the_game_opens() {
-    let root = scratch("runtime-marker");
-    let version = root.join("versions/v1");
-    fs::create_dir_all(version.join(".local/horizon-client/26.3")).unwrap();
-    fs::write(version.join(PROGRAM), "server").unwrap();
-    fs::write(version.join(crate::backend::CLIENT), "game").unwrap();
-    fs::write(version.join(".installed"), "").unwrap();
-    fs::write(
-        version.join(".local/horizon-client/26.3/horizon-resources.json"),
-        "{}",
-    )
-    .unwrap();
-    let rt = root.join("runtime");
-    set_up_in(&rt, &version, "v1", "26.3").unwrap();
-    let marker = rt.join("releases/v1/.installed");
-    assert!(marker.is_file());
-    assert_eq!(fs::metadata(&marker).unwrap().len(), 0);
-    // A release an older launcher laid down has no marker: setting up again restores it.
-    fs::remove_file(&marker).unwrap();
-    set_up_in(&rt, &version, "v1", "26.3").unwrap();
-    assert!(marker.is_file());
-    assert_eq!(fs::metadata(&marker).unwrap().len(), 0);
-    // The engine opens an empty regular file: a marker that is not one is replaced, not trusted.
-    fs::write(&marker, "installed").unwrap();
-    set_up_in(&rt, &version, "v1", "26.3").unwrap();
-    assert_eq!(fs::metadata(&marker).unwrap().len(), 0);
-    fs::remove_dir_all(&root).unwrap();
-}
-
-#[cfg(windows)]
-#[test]
-fn the_engine_finds_every_unit_it_leases_registered() {
-    use horizon_platform::mod_package::{
-        holder, locks::LockMode, runtime_leases::open_directory, runtime_leases::Registry,
-        selection::LaunchArguments,
+    let resources = if cfg!(windows) {
+        Path::new(r"\\school\clubs\minecraft\core\v1\.local\horizon-client\26.3")
+    } else {
+        Path::new("/share/minecraft/core/v1/.local/horizon-client/26.3")
     };
-    // The launcher home and the runtime the launcher publishes there: a child process's own.
-    const ACTOR: &str = "HORIZON_SERVER_LEASES_TEST_ACTOR";
-    if std::env::var_os(ACTOR).is_none() {
-        let launcher_home = tempfile::tempdir().unwrap();
-        let output = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--include-ignored",
-                "--exact",
-                "servers::tests::the_engine_finds_every_unit_it_leases_registered",
-                "--nocapture",
-            ])
-            .env(ACTOR, "1")
-            .env("HORIZON_LAUNCHER_HOME", launcher_home.path())
-            .output()
-            .unwrap();
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(output.status.success(), "{stdout}\n{stderr}");
-        assert!(
-            stdout.contains("test result: ok. 1 passed;"),
-            "exact-name child did not run one test:\n{stdout}\n{stderr}"
-        );
-        return;
-    }
-    // A prepared version, the runtime `set_up` lays down from it, and a server folder.
-    let data = backend::data_dir();
-    let version = data.join("versions/v1");
-    let prepared = version.join(".local/horizon-client/26.3");
-    fs::create_dir_all(&prepared).unwrap();
-    fs::write(version.join(PROGRAM), "server").unwrap();
-    fs::write(version.join(crate::backend::CLIENT), "game").unwrap();
-    fs::write(version.join(".installed"), "").unwrap();
-    fs::write(prepared.join("horizon-resources.json"), "{}").unwrap();
-    let rt = runtime_root();
-    set_up_in(&rt, &version, "v1", "26.3").unwrap();
-    let server = data.join("servers/survival");
-    fs::create_dir_all(&server).unwrap();
-    // A release an older launcher laid down has no marker, and run_managed supplies it.
-    let marker = rt.join("releases/v1/.installed");
-    fs::remove_file(&marker).unwrap();
-    // The engine command `run_managed` prepares: the release's game, its prepared game files.
-    let mut engine = Command::new(rt.join("current").join(crate::backend::CLIENT));
-    engine
-        .arg("--resources")
-        .arg(game_files(&rt, "26.3"))
-        .current_dir(&server);
-    let leases = lease_engine(&engine, &data).unwrap();
-
-    // What the game does at start: lock each unit `lease_paths` names, creating none.
-    let data = data.canonicalize().unwrap();
-    let selection = LaunchArguments::for_command(&engine).unwrap();
-    let units = holder::lease_paths(
-        Path::new(engine.get_program()),
-        &selection,
-        &data,
-        engine.get_current_dir().unwrap(),
-    )
-    .unwrap();
-    let install = units
-        .iter()
-        .find(|(_, complete)| *complete)
-        .map(|(unit, _)| unit)
-        .expect("the release is an installation");
-    assert!(install.ends_with("releases/v1"));
-    assert_eq!(fs::metadata(install.join(".installed")).unwrap().len(), 0);
-    let registry = Registry::existing(&data).unwrap();
-    let missing: Vec<_> = units
-        .iter()
-        .filter(|(unit, _)| {
-            let directory = open_directory(unit).unwrap();
-            registry.lock(&directory, LockMode::Shared).is_err()
-        })
-        .map(|(unit, _)| unit.display().to_string())
-        .collect();
-    drop(leases);
+    let args = settings_args(&spec, resources).join(" ");
     assert!(
-        missing.is_empty(),
-        "units the game cannot lease: {missing:?}"
+        args.starts_with(
+            "config set world.game_mode=survival world.difficulty=normal server.max_players=10 \
+             server.motd=Friends server.online_mode=false panel.bind= engine.resources="
+        ),
+        "{args}"
+    );
+    // The game files are the build's prepared folder, read in place from the share.
+    let tail = if cfg!(windows) {
+        r"core\v1\.local\horizon-client\26.3"
+    } else {
+        "core/v1/.local/horizon-client/26.3"
+    };
+    // ...and every player is put in the server's mode, whatever an earlier visit saved for them.
+    assert!(
+        args.ends_with(&format!("{tail} properties.force-gamemode=true")),
+        "{args}"
     );
 }
 
-#[cfg(windows)]
+/// A hosted server takes a port from the club's `[hosting]` range, never outside it.
 #[test]
-fn an_engine_from_outside_the_launcher_is_left_alone() {
-    let root = scratch("engine-outside");
-    let data = root.join("data");
-    fs::create_dir_all(&data).unwrap();
-    let version = root.join("version");
-    fs::create_dir_all(&version).unwrap();
-    fs::write(version.join(crate::backend::CLIENT), "game").unwrap();
-    let mut engine = Command::new(version.join(crate::backend::CLIENT));
-    engine.arg("--resources").arg(version.join("resources"));
-    // `[engine] engine.path` and the PATH can name an engine of the player's: the game takes no
-    // leases there, and the launcher writes neither a marker nor a claim into that folder.
-    assert!(lease_engine(&engine, &data).unwrap().is_empty());
-    assert!(!version.join(".installed").exists());
-    // Another installation inside the launcher's data (a version its cleanup invalidated) is not the
-    // launcher's runtime either: completing it would list a deleted version as installed again.
-    let version = data.join("versions/v9");
-    fs::create_dir_all(&version).unwrap();
-    fs::write(version.join(crate::backend::CLIENT), "game").unwrap();
-    let mut engine = Command::new(version.join(crate::backend::CLIENT));
-    engine.arg("--resources").arg(version.join("resources"));
-    assert!(lease_engine(&engine, &data).unwrap().is_empty());
-    assert!(!version.join(".installed").exists());
-    fs::remove_dir_all(&root).unwrap();
+fn a_port_comes_from_the_clubs_range_and_none_is_free_when_all_are_taken() {
+    let taken = [25565u16];
+    assert_eq!(free_port(25565, 25575, &taken), Some(25566));
+    assert_eq!(free_port(25565, 25575, &[25565, 25566]), Some(25567));
+    // The whole range taken: no server is created.
+    assert_eq!(free_port(25565, 25565, &[25565]), None);
+    // A port another program holds (not one of `taken`) is skipped: 25565 is bound here.
+    let held = std::net::TcpListener::bind(("127.0.0.1", 25565)).unwrap();
+    assert_eq!(free_port(25565, 25567, &[]), Some(25566));
+    drop(held);
+    assert_eq!(free_port(25565, 25567, &[]), Some(25565));
 }
 
 #[test]
 fn problems_say_what_to_do() {
     let dir = scratch("problems");
+    fs::write(dir.join("server.toml"), "[server]\nport = 25566\n").unwrap();
     let port = Problem::explain_with(
         "",
         "[Server thread/WARN]: **** FAILED TO BIND TO PORT!\nThe exception was: Address already in use (os error 48)",
         &dir,
     );
-    assert!(port.message.contains("already used"), "{}", port.message);
-    assert!(matches!(port.fix, Some(Fix::UsePort(p)) if p > 25565));
+    assert!(port.message.contains("25566"), "{}", port.message);
+    assert_eq!(port.fix, Some(Fix::PortTaken));
     let files = Problem::explain_with(
         "horizon-server: no prepared game files. Horizon reads them from",
         "",
         &dir,
     );
-    assert_eq!(files.fix, Some(Fix::Prepare));
-    let reports = Problem::explain_with(
-        "",
-        "**** FAILED TO BIND TO PORT!\nThe exception was: registries.json not found next to the resources",
-        &dir,
-    );
-    assert_eq!(reports.fix, Some(Fix::Prepare));
+    assert_eq!(files.fix, None);
     let other = Problem::explain_with("horizon-server: a server is already running in x", "", &dir);
     assert_eq!(other, Problem::plain("A server is already running in x"));
     fs::remove_dir_all(&dir).unwrap();
@@ -293,9 +128,22 @@ fn lists_and_status_read_as_vanilla_and_the_supervisor_write_them() {
         (s.tps, s.mspt, s.max_players),
         (Some(20.0), Some(4.2), Some(10))
     );
-    assert_eq!(s.update_available.as_deref(), Some("v2"));
-    assert_eq!(s.update_last, Some(("Not updated: x".into(), false)));
     assert!(!Status::stopped().running());
+}
+
+/// The port a server's `server.toml` sets, read from the file: what the busy-port problem names
+/// and the announcement says.
+#[test]
+fn the_port_comes_from_server_toml() {
+    let dir = scratch("port");
+    assert_eq!(port_of(&dir), None);
+    fs::write(
+        dir.join("server.toml"),
+        "[server]\nmotd = \"x\"\nport = 25570\n",
+    )
+    .unwrap();
+    assert_eq!(port_of(&dir), Some(25570));
+    let _ = fs::remove_dir_all(&dir);
 }
 
 /// The control API: the token goes with every call, and errors come back as the server words them.
@@ -442,15 +290,39 @@ fn the_game_mode_comes_from_server_toml() {
 }
 
 #[test]
-fn only_horizon_server_tasks_are_background_servers() {
-    let tasks = [
-        "horizon-server-survival",
-        "OneDrive Update",
-        "horizon-serverless",
-        "Horizon-Server-x",
+fn a_new_game_mode_reaches_the_players_on_a_running_server() {
+    let changes = [
+        ("world.difficulty", "hard".to_string()),
+        ("world.game_mode", "creative".to_string()),
     ];
+    let applied = Applied {
+        applied: vec!["world.difficulty".into(), "world.game_mode".into()],
+        running: true,
+        ..Default::default()
+    };
     assert_eq!(
-        horizon_tasks(tasks.map(String::from).to_vec()),
-        ["horizon-server-survival"]
+        mode_command(&changes, &applied).as_deref(),
+        Some("gamemode creative @a")
+    );
+    // Stopped, the setting waits for the next start; another setting moves nobody.
+    assert_eq!(
+        mode_command(
+            &changes,
+            &Applied {
+                running: false,
+                ..applied.clone()
+            }
+        ),
+        None
+    );
+    assert_eq!(
+        mode_command(
+            &changes,
+            &Applied {
+                applied: vec!["world.difficulty".into()],
+                ..applied
+            }
+        ),
+        None
     );
 }

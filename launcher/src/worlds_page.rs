@@ -1,15 +1,13 @@
-//! The selected instance's worlds on Home (`horizon_launcher::worlds`): each with its picture,
-//! mode, version, when it was last played and its size, and Back up, Copy, Delete (to the
-//! trash, after a confirmation) and Open folder. Reading sizes and copying run in the background.
+//! The game's worlds on Home (`horizon_launcher::worlds`): each with its picture, mode, version,
+//! when it was last played and its size, and Back up, Copy, Delete (to the trash, after a
+//! confirmation) and Open folder. Reading sizes and copying run in the background.
 use super::*;
 use horizon_launcher::worlds::{self, World};
 use std::path::{Path, PathBuf};
 
 #[derive(Default)]
 pub(super) struct Worlds {
-    /// The game folder the list is of, and the list as last read: kept on screen while it is
-    /// read again, so the page doesn't jump.
-    pub(super) home: Option<PathBuf>,
+    /// The list as last read: kept on screen while it is read again, so the page doesn't jump.
     pub(super) list: Vec<World>,
     /// Which of the list's rows Home's glass Worlds tab has built and measured (`cull`).
     pub(super) cull: cull::Cull,
@@ -23,10 +21,6 @@ pub(super) struct Worlds {
 }
 
 impl Worlds {
-    pub(super) fn location_busy(&self) -> bool {
-        self.busy.is_some()
-    }
-
     /// Read again on the next frame: the game may have saved, or an action changed the list.
     pub(super) fn stale(&mut self) {
         self.fresh = false;
@@ -52,33 +46,22 @@ pub(super) enum Action {
 }
 
 impl Launcher {
-    /// Reads the worlds of `home` in the background when the list is missing or of another
-    /// instance.
-    pub(super) fn load_worlds(&mut self, home: PathBuf, cx: &mut Context<Self>) {
-        if self.worlds.home.as_ref() != Some(&home) {
-            self.worlds = Worlds {
-                home: Some(home.clone()),
-                ..Worlds::default()
-            };
-        }
+    /// Reads the game's worlds in the background when the list is missing or stale.
+    pub(super) fn load_worlds(&mut self, cx: &mut Context<Self>) {
         if self.worlds.fresh || self.worlds.reading {
             return;
         }
         self.worlds.reading = true;
-        let read = home.clone();
         let task = cx
             .background_executor()
-            .spawn(async move { worlds::list(&read) });
+            .spawn(async move { worlds::list(&backend::game_home()) });
         cx.spawn(async move |this, cx| {
             let list = task.await;
             let _ = this.update(cx, |this, cx| {
-                // Another instance may have been picked meanwhile.
-                if this.worlds.home.as_ref() == Some(&home) {
-                    this.worlds.list = list;
-                    this.worlds.cull.reset();
-                    this.worlds.fresh = true;
-                    this.worlds.reading = false;
-                }
+                this.worlds.list = list;
+                this.worlds.cull.reset();
+                this.worlds.fresh = true;
+                this.worlds.reading = false;
                 cx.notify();
             });
         })
@@ -86,9 +69,7 @@ impl Launcher {
     }
 
     pub(super) fn world_action(&mut self, action: Action, world: World, cx: &mut Context<Self>) {
-        let Some(home) = self.worlds.home.clone() else {
-            return;
-        };
+        let home = backend::game_home();
         if self.worlds.busy.is_some() {
             return;
         }
@@ -125,18 +106,16 @@ impl Launcher {
         .detach();
     }
 
-    /// How many worlds the selected instance has; None while they are read.
+    /// How many worlds the game has; None while they are read.
     pub(super) fn worlds_count(&mut self, cx: &mut Context<Self>) -> Option<usize> {
-        let home = self.selected_instance()?.home.clone();
-        self.load_worlds(home, cx);
+        self.load_worlds(cx);
         self.worlds.fresh.then_some(self.worlds.list.len())
     }
 
-    /// Home's Worlds tab, for the selected instance.
-    pub(super) fn worlds_section(&mut self, cx: &mut Context<Self>) -> Option<Div> {
+    /// Home's Worlds tab.
+    pub(super) fn worlds_section(&mut self, cx: &mut Context<Self>) -> Div {
         let t = self.theme;
-        let home = self.selected_instance()?.home.clone();
-        self.load_worlds(home.clone(), cx);
+        self.load_worlds(cx);
         let list = self.worlds.list.clone();
         let mut section = div().flex().flex_col().gap(px(8.));
         match &self.worlds.done {
@@ -159,36 +138,31 @@ impl Launcher {
             None => {}
         }
         if list.is_empty() {
-            let saves = home.join("saves");
-            return Some(
-                section.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .child(
-                            text(theme::CAPTION)
-                                .text_color(t.muted)
-                                .child(tr("No worlds yet: they appear here once you play one.")),
-                        )
-                        .child(
-                            button("worlds-folder", "Open folder", Kind::Ghost, &t).on_click(
-                                move |_, _, cx| {
-                                    let _ = std::fs::create_dir_all(&saves);
-                                    crate::glass_toast::open(cx, &saves);
-                                },
-                            ),
+            let saves = backend::game_home().join("saves");
+            return section.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        text(theme::CAPTION)
+                            .text_color(t.muted)
+                            .child(tr("No worlds yet: they appear here once you play one.")),
+                    )
+                    .child(
+                        button("worlds-folder", "Open folder", Kind::Ghost, &t).on_click(
+                            move |_, _, cx| {
+                                let _ = std::fs::create_dir_all(&saves);
+                                crate::glass_toast::open(cx, &saves);
+                            },
                         ),
-                ),
+                    ),
             );
         }
         for (i, w) in list.into_iter().enumerate() {
-            let row = self.world_row(i, w.clone(), cx);
-            section = section
-                .child(self.world_drop_target(i, &w, row, cx))
-                .children(self.world_packs_panel(&w, cx));
+            section = section.child(self.world_row(i, w, cx));
         }
-        Some(section)
+        section
     }
 
     fn world_row(&mut self, i: usize, w: World, cx: &mut Context<Self>) -> Div {
@@ -261,7 +235,7 @@ impl Launcher {
             let (backup, copy, folder) = (w.clone(), w.clone(), w.path.clone());
             let (delete, play) = (w.folder.clone(), w.folder.clone());
             let play_button = act("world-play", "Play", Kind::Secondary);
-            let play_button = if !self.can_start_selected() {
+            let play_button = if !self.can_start() {
                 disabled(play_button)
             } else {
                 play_button
@@ -298,19 +272,6 @@ impl Launcher {
                         },
                     )),
                 )
-                .child({
-                    let world = w.clone();
-                    let label = match self.world_packs_open(&w) {
-                        true => "Hide data packs",
-                        false => "Data packs",
-                    };
-                    act("world-packs", label, Kind::Ghost).on_click(cx.listener(
-                        move |this, _: &ClickEvent, _, cx| {
-                            this.toggle_world_packs(&world);
-                            cx.notify();
-                        },
-                    ))
-                })
                 .child(
                     act("world-folder", "Open folder", Kind::Ghost)
                         .on_click(move |_, _, cx| crate::glass_toast::open(cx, &folder)),

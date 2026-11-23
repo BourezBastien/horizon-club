@@ -912,7 +912,7 @@ impl Title {
             message_lines: Cell::new(1),
             warning_check: Cell::new([0.0; 4]),
             credits_button: Cell::new([0.0; 4]),
-            allows_multiplayer: true,
+            allows_multiplayer: crate::managed::multiplayer(),
             ban_queue: Default::default(),
             ban_buttons: Cell::new([(0.0, 0.0); 3]),
             backup: None,

@@ -1,14 +1,117 @@
 //! The Create a server dialog in the glass look (the mockup's `ServerModal`, horizon-site
 //! `components/launcher/server-modal.tsx`): one plate round at 28 over the dimmed page. On the
 //! left, what the server will be (a picture, its name and its rules); on the right, its name,
-//! world, game mode, difficulty, how many players, who may join and whether accounts are
-//! checked; the EULA, Cancel and Create at the foot. Dark appearance only.
+//! world, game mode, difficulty, how many players and who may join; Cancel and Create at the
+//! foot. Dark appearance only. The EULA needs no tick: the club's supervisor accepted it in
+//! `club.toml` ([hosting] eula_accepted), and a server that may not run says so instead.
 use super::*;
-use crate::glass_instance::{choice, choice_text, list_box, list_choice, section, tick};
 use crate::glass_ui::{self as ui, white};
 use gpui::{img, ImageFormat};
 use horizon_theme::glass::{fill, ink, radius};
 use std::sync::{Arc, LazyLock};
+
+/// A choice card (`CHOICE`): round at 16, white at 12 % when chosen, else 4 %, 7 % under the
+/// pointer.
+fn choice(id: impl Into<SharedString>, on: bool, accent: u32, t: &Theme) -> Stateful<Div> {
+    keyboard(
+        div()
+            .id(id.into())
+            .relative()
+            .flex()
+            .rounded(px(radius::POPOVER))
+            .cursor_pointer()
+            .bg(white(if on { fill::ACTIVE } else { 0.04 }))
+            // The picked card keeps its fill and gains the accent's thin border, so the choice
+            // reads at a glance (the fill alone was too close to the idle card's).
+            .when(on, |d| d.border_1().border_color(ui::color(accent)))
+            .when(!on, |d| {
+                d.child(ui::back_tint(radius::POPOVER, white(0.03)))
+            }),
+        t,
+    )
+}
+
+/// A choice's two lines: its title at 15 px, semibold, its note at 13 px.
+fn choice_text(title: impl Into<SharedString>, note: impl Into<SharedString>) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .min_w_0()
+        .child(
+            ui::text(15., FontWeight::SEMIBOLD, ink::FULL)
+                .truncate()
+                .child(title.into()),
+        )
+        .child(
+            ui::text(13., FontWeight::NORMAL, ink::QUIET)
+                .line_height(px(18.))
+                .child(note.into()),
+        )
+}
+
+/// A `Section`: its title at 13 px, white at 60 %, anything `aside` at its right, then `body`.
+fn section(title: SharedString, aside: Option<Div>, body: impl IntoElement) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .flex_none()
+        .child(
+            div()
+                .flex()
+                .items_end()
+                .justify_between()
+                .gap(px(16.))
+                .mb(px(12.))
+                .child(ui::text(13., FontWeight::MEDIUM, ink::NOTE).child(title))
+                .children(aside),
+        )
+        .child(body)
+}
+
+/// A list's row of choices: round at 12, white at 11 % when chosen, 5 % under the pointer.
+fn list_choice(id: impl Into<SharedString>, on: bool, t: &Theme) -> Stateful<Div> {
+    keyboard(
+        div()
+            .id(id.into())
+            .relative()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(16.))
+            .px(px(16.))
+            .rounded(px(radius::ROW))
+            .cursor_pointer()
+            .when(on, |d| d.bg(white(0.11)))
+            .when(!on, |d| {
+                d.child(ui::back_tint(radius::ROW, white(fill::HOVER)))
+            }),
+        t,
+    )
+}
+
+/// The tick at a list row's end, the accent's soft shade, in a 20 px column.
+fn tick(on: bool, soft: u32) -> Div {
+    div()
+        .flex()
+        .flex_none()
+        .justify_center()
+        .w(px(20.))
+        .children(on.then(|| ui::icon("tick-02", 18., ui::color(soft))))
+}
+
+/// A list of rows on white at 4 %, round at 16, scrolling past `max` px.
+fn list_box(id: &'static str, max: f32) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex()
+        .flex_col()
+        .max_h(px(max))
+        .overflow_y_scroll()
+        .on_scroll(|_, _, cx| cx.stop_propagation())
+        .p(px(6.))
+        .rounded(px(radius::POPOVER))
+        .bg(white(0.04))
+}
 
 /// The mockup's pictures for each game mode (`COVERS`): Horizon screenshots from `docs/media`.
 static COVERS: LazyLock<[Arc<gpui::Image>; 3]> = LazyLock::new(|| {
@@ -121,12 +224,7 @@ impl Launcher {
                 "up to {max} players",
                 &[("max", &c.max_players.to_string())],
             ),
-            tr(if c.friends_only {
-                "friends only"
-            } else {
-                "anyone with the address"
-            })
-            .to_string(),
+            tr("friends only").to_string(),
         ]
         .join(" · ");
         let copy = c
@@ -209,7 +307,7 @@ impl Launcher {
             .child(
                 ui::text(13., FontWeight::NORMAL, ink::FAINT)
                     .line_height(px(20.))
-                    .child(tr("Everything has a default: tick the EULA and Create makes a friends-only survival world. You can change all of it later, from the server's Settings tab.")),
+                    .child(tr("Everything has a default: Create makes a friends-only survival world. You can change all of it later, from the server's Settings tab.")),
             )
     }
 
@@ -222,7 +320,7 @@ impl Launcher {
         let (new_world, copy, worlds) = (c.new_world, c.copy.clone(), c.worlds.clone());
         let details = c.details.clone();
         let (mode, difficulty, max) = (c.mode, c.difficulty, c.max_players);
-        let (friends_only, check, friends) = (c.friends_only, c.check_accounts, c.friends.clone());
+        let friends = c.friends.clone();
         let creating = self.servers.creating;
         // The mockup's `clamp(1.6rem, 2.4vw, 2.1rem)`.
         let size = (self.window_width * 0.024).clamp(25.6, 33.6);
@@ -252,9 +350,7 @@ impl Launcher {
                     .child(
                         ui::text(14., FontWeight::NORMAL, ink::NOTE)
                             .mt(px(6.))
-                            .child(tr(
-                                "The same program a VPS runs, started from here with buttons.",
-                            )),
+                            .child(tr("A server of your own, started from here with buttons.")),
                     ),
             )
             .child(
@@ -278,8 +374,10 @@ impl Launcher {
 
         // The world: new (with a seed) or a copy of one of the player's.
         let card = |id: &'static str, on: bool, title: SharedString, note: String| {
-            choice(id, on, &t)
+            choice(id, on, self.look.accent_soft, &t)
                 .flex_1()
+                .min_w_0()
+                .flex_basis(px(0.))
                 .p(px(16.))
                 .child(choice_text(title, note))
         };
@@ -379,9 +477,12 @@ impl Launcher {
                 choice(
                     SharedString::from(format!("create-mode-{id}")),
                     mode == id,
+                    self.look.accent_soft,
                     &t,
                 )
                 .flex_1()
+                .min_w_0()
+                .flex_basis(px(0.))
                 .p(px(16.))
                 .child(choice_text(tr(label), tr(MODE_NOTES[i]).to_string()))
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
@@ -471,78 +572,38 @@ impl Launcher {
             .child(step("create-more", "plus-sign", 1, max < 100));
         let numbers = div()
             .flex()
-            .justify_between()
             .gap(px(36.))
-            .child(section(
-                tr("Difficulty").into(),
-                None,
-                div().flex().child(difficulties),
-            ))
-            .child(section(
-                tr("Most players at once").into(),
-                None,
-                div().flex().child(players),
-            ));
-
-        // Who may join: friends only (their names, the first an operator) or anyone.
-        let mut who = div().flex().flex_col().child(
-            div()
-                .flex()
-                .gap(px(10.))
-                .child(
-                    card(
-                        "create-friends",
-                        friends_only,
-                        tr("Friends only").into(),
-                        tr("A whitelist of the names below").to_string(),
-                    )
-                    .on_click(set(cx, |c| c.friends_only = true)),
+            // Two halves on one grid: the strip to the left, the stepper to the right, each
+            // heading and control starting at its own half's edge.
+            .child(
+                section(
+                    tr("Difficulty").into(),
+                    None,
+                    div().flex().child(difficulties),
                 )
-                .child(
-                    card(
-                        "create-anyone",
-                        !friends_only,
-                        tr("Anyone with the address").into(),
-                        tr("Keep it on your network or Tailscale").to_string(),
-                    )
-                    .on_click(set(cx, |c| c.friends_only = false)),
-                ),
-        );
-        if friends_only {
-            who = who.child(self.create_friends(&friends, cx)).child(
+                .flex_1()
+                .min_w_0(),
+            )
+            .child(
+                section(
+                    tr("Most players at once").into(),
+                    None,
+                    div().flex().child(players),
+                )
+                .flex_1()
+                .min_w_0(),
+            );
+
+        // Who may join: the friends named below (the first an operator). A hosted server is
+        // friends-only; the Settings tab can open it to the club's network later.
+        let who = div().flex().flex_col().child(
+            self.create_friends(&friends, cx).child(
                 ui::card_note(tr(
                     "The first one becomes an operator. Add more later on the Players tab.",
                 ))
                 .mt(px(10.)),
-            );
-        }
-
-        // Account checks (not in the mockup's words: Horizon players sign in with Microsoft now).
-        let accounts = div()
-            .flex()
-            .items_start()
-            .justify_between()
-            .gap(px(24.))
-            .p(px(16.))
-            .rounded(px(radius::POPOVER))
-            .bg(white(0.04))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .child(ui::text(15., FontWeight::SEMIBOLD, ink::FULL).child(tr("Check Minecraft accounts")))
-                    .child(
-                        ui::text(13., FontWeight::NORMAL, ink::QUIET)
-                            .mt(px(2.))
-                            .max_w(px(560.))
-                            .line_height(px(19.5))
-                            .child(tr("On: every player signs in with Microsoft, so nobody can join under someone else's name. Turn it off only if a player can't sign in.")),
-                    ),
-            )
-            .child(
-                ui::toggle("create-accounts", check, self.look.accent, self.look.on_accent, &t)
-                    .on_click(set(cx, |c| c.check_accounts = !c.check_accounts)),
-            );
+            ),
+        );
 
         let body = div()
             .id("create-body")
@@ -550,7 +611,9 @@ impl Launcher {
             .flex_col()
             .flex_1()
             .min_h_0()
-            .gap(px(36.))
+            // A tighter rhythm than the first draft: 24 px between the groups keeps the seed,
+            // the mode and the players above the fold on a small window.
+            .gap(px(24.))
             .px(px(36.))
             .pb(px(32.))
             .overflow_y_scroll()
@@ -562,8 +625,7 @@ impl Launcher {
             .child(world)
             .child(section(tr("Game mode").into(), None, modes))
             .child(numbers)
-            .child(section(tr("Who can join").into(), None, who))
-            .child(accounts);
+            .child(section(tr("Who can join").into(), None, who));
         div()
             .flex()
             .flex_col()
@@ -577,24 +639,17 @@ impl Launcher {
     /// The friends let in, as chips with their face (the first is an operator), then a field to add one.
     fn create_friends(&mut self, friends: &[String], cx: &mut Context<Self>) -> Div {
         let t = self.theme;
-        let own = self
-            .accounts
-            .selected()
-            .map(|a| (a.name.clone(), a.uuid.clone()));
         let mut chips = div().mt(px(12.)).flex().flex_wrap().gap(px(8.));
         for (i, name) in friends.iter().enumerate() {
-            let face = match &own {
-                Some((n, uuid)) if n == name => self.head(uuid, 30.).rounded(px(8.)),
-                _ => div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .justify_center()
-                    .size(px(30.))
-                    .rounded(px(8.))
-                    .bg(white(fill::BUTTON))
-                    .child(ui::icon("user", 16., white(ink::BODY))),
-            };
+            let face = div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .size(px(30.))
+                .rounded(px(8.))
+                .bg(white(fill::BUTTON))
+                .child(ui::icon("user", 16., white(ink::BODY)));
             let mut chip = div()
                 .flex()
                 .items_center()
@@ -697,83 +752,25 @@ impl Launcher {
         }
     }
 
-    /// The foot: the EULA and its link, what is happening, Cancel and Create server.
+    /// The foot: what is happening, Cancel and Create server. The EULA needs no tick: the club's
+    /// supervisor accepted it in `club.toml`, and a server that may not be created says why here.
     fn create_foot(&mut self, cx: &mut Context<Self>) -> Div {
         let t = self.theme;
-        let Some(c) = self.servers.create.as_ref() else {
+        if self.servers.create.is_none() {
             return div();
-        };
-        let (eula, missing, creating) = (c.eula, c.eula_missing, self.servers.creating);
+        }
+        let creating = self.servers.creating;
         let look = self.look;
-        let tickbox = div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .justify_center()
-            .size(px(22.))
-            .rounded(px(7.))
-            .bg(if eula {
-                ui::color(look.accent)
-            } else {
-                white(fill::SELECTED)
-            })
-            .when(eula, |d| {
-                d.child(ui::icon("tick-02", 15., ui::color(look.on_accent)))
-            });
-        let agree = keyboard(
-            div()
-                .id("create-eula")
-                .flex()
-                .items_center()
-                .gap(px(12.))
-                .min_w_0()
-                .cursor_pointer()
-                .child(tickbox)
-                .child(
-                    // Narrow foot (a long EULA wording, or the Prepare button as well): the
-                    // wording shortens with an ellipsis instead of running under the buttons.
-                    ui::text(14., FontWeight::NORMAL, ink::FULL)
-                        .truncate()
-                        .when(missing, |d| d.text_color(ui::danger()))
-                        .child(tr("I agree to the Minecraft EULA")),
-                ),
-            &t,
-        )
-        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-            if let Some(c) = &mut this.servers.create {
-                c.eula = !c.eula;
-                c.eula_missing = false;
-            }
-            cx.notify();
-        }));
-        let read = div()
-            .id("create-eula-read")
-            .font_family(horizon_theme::glass::FONT)
-            .text_size(px(14.))
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(ui::color(look.accent_soft))
-            .cursor_pointer()
-            .hover(|s| s.text_color(white(ink::FULL)))
-            .child(tr("Read it"))
-            .on_click(|_, _, cx| cx.open_url(servers::EULA_URL));
-        // What is happening, between the EULA and the buttons (not in the mockup).
+        // What is happening, above the buttons (not in the mockup).
         let status = if creating {
             let last = self.servers.job_log.back().cloned().unwrap_or_default();
             Some(ui::card_note(format!("{} {last}", tr("Creating…"))).truncate())
-        } else if let Some(p) = &self.servers.problem {
-            Some(foot_status(p.message.clone().into(), ui::danger()))
-        } else if missing {
-            Some(foot_status(
-                tr("Tick the EULA box to create the server.").into(),
-                ui::danger(),
-            ))
         } else {
-            None
+            self.servers
+                .problem
+                .as_ref()
+                .map(|p| foot_status(p.message.clone().into(), ui::danger()))
         };
-        let fix = self.servers.problem.as_ref().and_then(|p| match &p.fix {
-            Some(fix @ Fix::Prepare) => Some(fix.clone()),
-            _ => None,
-        });
         let cancel = keyboard(
             div()
                 .id("create-cancel")
@@ -809,8 +806,6 @@ impl Launcher {
                 .text_size(px(15.))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(ui::color(look.on_accent))
-                // The mockup greys it until the EULA is ticked; a press then says why.
-                .when(!eula, |d| d.opacity(0.5))
                 .child(tr("Create server")),
             &t,
         );
@@ -825,14 +820,6 @@ impl Launcher {
             div()
                 .flex()
                 .gap(px(8.))
-                .children(fix.map(|fix| {
-                    ui::quiet("create-fix", tr("Prepare the game files"), 48., &t).on_click(
-                        cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            this.fix(fix.clone(), cx);
-                            cx.notify();
-                        }),
-                    )
-                }))
                 .child(cancel.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.servers.create = None;
                     this.servers.problem = None;
@@ -843,14 +830,14 @@ impl Launcher {
                     cx.notify();
                 })))
         };
-        create_foot_row(agree, read.flex_none(), status, buttons)
+        create_foot_row(status, buttons)
     }
 }
 
-/// A message in the foot (a problem, or why the EULA still has to be ticked): a row of its own
-/// across the foot, wrapping over at most two lines with an ellipsis, so however long the
-/// message is the foot keeps its height (#16086: sharing the EULA's row squeezed the message
-/// into a column a word wide, and its wrap swallowed the dialog's body).
+/// A message in the foot (a problem, or what the creation is doing): a row of its own across
+/// the foot, wrapping over at most two lines with an ellipsis, so however long the message is
+/// the foot keeps its height (#16086: sharing a row with the buttons squeezed the message into
+/// a column a word wide, and its wrap swallowed the dialog's body).
 fn foot_status(message: SharedString, color: Hsla) -> Div {
     ui::text(13., FontWeight::NORMAL, ink::FULL)
         .text_color(color)
@@ -861,15 +848,10 @@ fn foot_status(message: SharedString, color: Hsla) -> Div {
         .child(message)
 }
 
-/// The foot: the message on its own row, then the EULA and its link on the left, the buttons on
-/// the right. The message takes the foot's whole width, so the EULA's wording and the buttons'
-/// labels can never squeeze it; the buttons keep their own size (#16086).
-fn create_foot_row(
-    agree: impl IntoElement,
-    read: impl IntoElement,
-    status: Option<Div>,
-    buttons: impl IntoElement,
-) -> Div {
+/// The foot: the message on its own row, then the buttons on the right. The message takes the
+/// foot's whole width, so the buttons' labels can never squeeze it; the buttons keep their own
+/// size (#16086).
+fn create_foot_row(status: Option<Div>, buttons: impl IntoElement) -> Div {
     div()
         .flex()
         .flex_col()
@@ -885,18 +867,8 @@ fn create_foot_row(
             div()
                 .flex()
                 .items_center()
-                .justify_between()
+                .justify_end()
                 .gap(px(16.))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(12.))
-                        .flex_1()
-                        .min_w_0()
-                        .child(agree)
-                        .child(read),
-                )
                 .child(div().flex_none().child(buttons)),
         )
 }
@@ -933,14 +905,9 @@ mod foot_layout {
 
     impl Render for Foot {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            // The EULA row, its link and the buttons take fixed slices of the 760 px row; the
-            // message owns what they leave.
-            let agree = div().flex_none().w(px(220.)).h(px(22.));
-            let read = div().flex_none().w(px(40.)).h(px(18.));
+            // The buttons take a fixed slice of the 760 px row; the message owns what they leave.
             let buttons = div().flex_none().w(px(200.)).h(px(48.));
             div().w(px(760.)).child(create_foot_row(
-                agree,
-                read,
                 Some(foot_status(self.message.clone(), ui::danger())),
                 buttons,
             ))
@@ -949,8 +916,8 @@ mod foot_layout {
 
     #[gpui::test]
     async fn a_long_message_wraps_in_two_lines_on_its_own_foot_row(cx: &mut TestAppContext) {
-        // The reporter's message: a nightly's tag alone is a word longer than the foot's room.
-        let message: SharedString = "Horizon nightly-2026-11-13-9f42064 isn't prepared yet: press Prepare on the Play page (it uses your own Minecraft 26.3)".into();
+        // A problem's message: a build's name alone is a word longer than the foot's room.
+        let message: SharedString = "Horizon club-2026-11-13-9f42064 isn't prepared yet: ask the club's supervisor to prepare the game.".into();
         let (view, cx) = cx.add_window_view(|_, _| Foot { message });
         cx.run_until_parked();
         let status = cx.debug_bounds("create-foot-status").unwrap();

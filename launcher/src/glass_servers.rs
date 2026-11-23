@@ -2,7 +2,7 @@
 //! `components/launcher/launcher-views.tsx`): the open server's glass with its state, name, numbers,
 //! Start or Restart and Stop, its console and command line; beside it the list of servers and how
 //! friends reach the open one. Below, what the mockup has no room for: the server's Players,
-//! Settings and Backups, then Sculk's banner (sponsor). Dark appearance only.
+//! Settings and Backups. Dark appearance only.
 use super::*;
 use crate::glass_ui::{self as ui, white, Tone};
 use horizon_theme::glass::{fill, ink, radius};
@@ -31,7 +31,7 @@ impl Launcher {
     pub(super) fn glass_servers_page(&mut self, cx: &mut Context<Self>) -> Div {
         let head = glass_ui::page_head(
             tr("Servers"),
-            tr("Host a world for your friends with buttons and no commands. The same program runs on a rented server too."),
+            tr("Host a world for your friends with buttons and no commands. The other students see it in their Multiplayer tab."),
         );
         // The mockup always shows a server: the open one, else the first.
         if self.servers.open.is_none() {
@@ -58,24 +58,33 @@ impl Launcher {
             .gap(px(10.))
             .child(self.glass_server_list(cx))
             .children(open.is_some().then(|| self.glass_addresses(&status, cx)));
+        // The server's column: what it is, then its tabs right under it (no gap when the side
+        // column is the taller one). The console comes last, across the whole page.
+        let mut column = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .gap(px(10.))
+            .child(main);
+        if let Some(dir) = &open {
+            column = column.child(self.glass_server_tabs(dir, &status, cx));
+        }
         let mut page = div().flex().flex_col().child(head).child(
             div()
                 .flex()
                 .items_start()
                 .gap(px(10.))
-                .child(main.flex_1().min_w_0())
+                .child(column)
                 .child(side),
         );
-        // Sculk's banner right under the server, where it is seen without scrolling past the
-        // server's tabs (as before the glass look, under the page's actions).
-        page = page.children(self.glass_sculk(cx));
-        if let Some(dir) = &open {
-            page = page.child(self.glass_server_tabs(dir, &status, cx));
+        if open.is_some() {
+            page = page.child(self.glass_server_console(status.running(), cx));
         }
         page
     }
 
-    /// The open server's glass: its state, name and numbers, its buttons, then its console.
+    /// The open server's glass: its state, name, numbers and buttons.
     fn glass_server(&mut self, dir: &Path, cx: &mut Context<Self>) -> Div {
         let t = self.theme;
         let status = self.servers.status();
@@ -132,36 +141,14 @@ impl Launcher {
             .join(" · ")
         };
 
-        // The web panel and the folder (not in the mockup): small icon buttons in the glass's top
-        // right corner, which the mockup leaves empty, so the head keeps its layout.
+        // The folder (not in the mockup): a small icon button in the glass's top right corner,
+        // which the mockup leaves empty, so the head keeps its layout.
         let mut corner = div()
             .absolute()
             .top(px(16.))
             .right(px(16.))
             .flex()
             .gap(px(4.));
-        let panel = ui::icon_button(
-            "server-panel",
-            "dashboard-square-01",
-            32.,
-            17.,
-            10.,
-            false,
-            &t,
-        );
-        corner = corner.child(if running {
-            let d = dir.to_path_buf();
-            panel.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                match servers::Api::open(&d).map(|a| a.panel_link()) {
-                    Some(Ok(url)) => cx.open_url(&url),
-                    Some(Err(e)) => this.servers.problem = Some(Problem::plain(e)),
-                    None => {}
-                }
-                cx.notify();
-            }))
-        } else {
-            panel.opacity(0.4).cursor_default()
-        });
         let folder = dir.to_path_buf();
         corner = corner.child(
             ui::icon_button("server-folder", "folder-01", 32., 17., 10., false, &t)
@@ -182,7 +169,9 @@ impl Launcher {
             } else {
                 wait(restart)
             });
-            let stop = ui::solid("server-start", tr("Stop"), 44., 14., &t).px(px(24.));
+            let stop = ui::quiet("server-start", tr("Stop"), 44., &t)
+                .px(px(24.))
+                .text_color(ui::color(horizon_theme::glass::DANGER));
             buttons = buttons.child(if idle {
                 stop.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.server_command("Stopping", vec!["stop".into()]);
@@ -247,7 +236,7 @@ impl Launcher {
                     .flex()
                     .items_end()
                     .justify_between()
-                    .gap(px(20.))
+                    .gap(px(32.))
                     .child(
                         div()
                             .flex()
@@ -287,7 +276,7 @@ impl Launcher {
             );
         }
         glass = glass.children(self.glass_server_notes(running, idle, cx));
-        glass.child(self.glass_server_console(running, cx))
+        glass
     }
 
     /// The action under way, a problem, a note and settings waiting for a restart, each a line on
@@ -339,10 +328,8 @@ impl Launcher {
             let mut d = line(Some(ui::danger()), p.message.clone());
             if let Some(fix) = p.fix {
                 let label = match &fix {
-                    Fix::UsePort(port) => trf("Use port {port}", &[("port", &port.to_string())]),
-                    Fix::Prepare => tr("Prepare the game files").into(),
-                    Fix::AgreeEula => tr("I agree to the EULA").into(),
-                    Fix::ShowLog => tr("Open the logs").into(),
+                    Fix::PortTaken => tr("Use a free port").to_string(),
+                    Fix::ShowLog => tr("Open the logs").to_string(),
                 };
                 d = d.child(
                     ui::quiet("problem-fix", label, 32., &t).on_click(cx.listener(
@@ -479,15 +466,18 @@ impl Launcher {
                 .into_any_element()
         };
         let focused = self.servers.focused == Some(Field::Command);
-        div()
-            .relative()
-            .mt(px(24.))
+        // Its own plate under the tabs, like them: the heading, the log, the command line.
+        glass::plate(radius::PANEL)
+            .mt(px(10.))
             .flex()
             .flex_col()
-            .child(body)
+            .gap(px(12.))
+            .p(px(24.))
+            .child(div().relative().child(ui::card_heading(tr("Console"))))
+            .child(div().relative().child(body))
             .child(
                 div()
-                    .mt(px(8.))
+                    .relative()
                     .flex()
                     .items_center()
                     .gap(px(8.))
@@ -532,7 +522,7 @@ impl Launcher {
                     .max_w(px(460.))
                     .text_center()
                     .line_height(px(21.))
-                    .child(tr("No server yet. Create one: it takes a few seconds, and with the defaults (accept Minecraft's terms, press Create) you get a friends-only survival world.")),
+                    .child(tr("No server yet. Create one: it takes a few seconds, and with the defaults you get a friends-only survival world your friends join from their Multiplayer tab.")),
             );
         if let Some(p) = self.servers.problem.clone() {
             card = card.child(glass_home_lists::danger_line(p.message).relative());
@@ -554,8 +544,7 @@ impl Launcher {
             )
     }
 
-    /// The servers, the open one lit, then Create a server and (not in the mockup) adding a
-    /// server folder.
+    /// The servers, the open one lit, then Create a server.
     fn glass_server_list(&mut self, cx: &mut Context<Self>) -> Div {
         let t = self.theme;
         let mut list = glass::plate(radius::PANEL).flex().flex_col().p(px(8.));
@@ -613,10 +602,16 @@ impl Launcher {
                 })),
             );
         }
+        // Create a server stands out: the accent's colour on the row's icon and its line.
+        let look = self.look;
         let action = |id: &'static str, icon: &'static str, label: SharedString| {
             keyboard(row(id.into(), false), &t)
-                .child(ui::icon(icon, 16., white(ink::BODY)))
-                .child(ui::text(14., FontWeight::NORMAL, ink::BODY).child(label))
+                .child(ui::icon(icon, 16., ui::color(look.accent)))
+                .child(
+                    ui::text(14., FontWeight::MEDIUM, 1.0)
+                        .text_color(ui::color(look.accent))
+                        .child(label),
+                )
         };
         list = list.child(
             action("server-create", "plus-sign", tr("Create a server").into()).on_click(
@@ -626,19 +621,10 @@ impl Launcher {
                 }),
             ),
         );
-        let add = action("server-add", "folder-01", tr("Add a server folder…").into());
-        list.child(if self.servers.creating {
-            add.opacity(0.4).cursor_default()
-        } else {
-            add.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                this.add_server_folder(cx);
-                cx.notify();
-            }))
-        })
+        list
     }
 
-    /// How friends reach the open server: on this network, over the internet (Tailscale), and who
-    /// is online now.
+    /// How friends reach the open server: on this network, and who is online now.
     fn glass_addresses(&mut self, status: &Status, cx: &mut Context<Self>) -> Div {
         let port = self
             .servers
@@ -659,7 +645,7 @@ impl Launcher {
                 id,
                 if copied { "tick-02" } else { "copy-01" },
                 36.,
-                17.,
+                20.,
                 10.,
                 false,
                 &this.theme,
@@ -696,18 +682,16 @@ impl Launcher {
             ))
             .child(
                 ui::card_note(tr(
-                    "Friends on the same Wi-Fi: Multiplayer, Add server, paste.",
+                    "The other students see this server in their Multiplayer tab while it runs.",
                 ))
-                .mt(px(4.)),
+                .mt(px(10.)),
             );
-        let internet = self.glass_internet(port, cx);
         let mut card = glass::plate(radius::PANEL)
             .flex()
             .flex_col()
             .gap(px(24.))
             .p(px(20.))
-            .child(here.relative())
-            .child(internet.relative());
+            .child(here.relative());
         if status.running() && !status.players.is_empty() {
             let ops = self
                 .servers
@@ -788,76 +772,24 @@ impl Launcher {
             div().flex().items_center().gap(px(4.)),
             items,
         );
-        let players = !matches!(self.servers.tab, Tab::Settings | Tab::Backups);
         let body = match self.servers.tab {
             Tab::Settings => self.settings_tab(status, cx),
             Tab::Backups => self.backups_tab(status, cx),
             _ => self.players_tab(dir, status, cx),
         };
         glass::plate(radius::PANEL)
-            .mt(px(10.))
             .flex()
             .flex_col()
             .gap(px(24.))
             .p(px(24.))
             .child(strip.relative())
             .child(body.relative())
-            .when(players, |d| {
-                d.child(self.internet_invites(port_of(self), cx).relative())
-            })
     }
-
-    /// Sculk's banner (sponsor, not in the mockup) on a glass card: "Partner" as the cards' small
-    /// headings, Hide once it has been on screen a while, the banner Sculk made.
-    fn glass_sculk(&mut self, cx: &mut Context<Self>) -> Option<Div> {
-        if self.settings.partner_hidden {
-            return None;
-        }
-        let t = self.theme;
-        let width = 600.;
-        let mut head = div()
-            .relative()
-            .flex()
-            .items_center()
-            .justify_between()
-            .child(ui::card_heading(tr("Partner")));
-        if self.settings.partner_seen_secs >= partner::SEEN_BEFORE_HIDE {
-            head = head.child(
-                button("partner-servers-hide", "Hide", Kind::Ghost, &t)
-                    .h(px(28.))
-                    .px(px(10.))
-                    .text_size(px(13.))
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.settings.partner_hidden = true;
-                        this.save_settings();
-                        cx.notify();
-                    })),
-            );
-        }
-        Some(
-            glass::plate(radius::PANEL)
-                .mt(px(10.))
-                .flex()
-                .flex_col()
-                .gap(px(12.))
-                .w(px(width + 40.))
-                .p(px(20.))
-                .child(head)
-                .child(partner::banner_image("partner-servers", width, &t).relative()),
-        )
-    }
-}
-
-/// The open server's port.
-fn port_of(this: &Launcher) -> u16 {
-    this.servers
-        .setting("server", "port")
-        .and_then(Value::as_u64)
-        .unwrap_or(25565) as u16
 }
 
 /// A settings row in the glass look, the mockup's `SettingRow`: the name in 15 px semibold, one
-/// line on it in 13 px at 60 % (or the refusal in red), the control on the right, 40 px apart.
+/// line on it in 13 px at 60 % (or the refusal in red), the control on the right, 20 px apart
+/// (the server's column is narrower than the mockup's: the name keeps its width).
 pub(super) fn glass_setting_row(
     name: &str,
     about: String,
@@ -871,7 +803,7 @@ pub(super) fn glass_setting_row(
     div()
         .flex()
         .items_center()
-        .gap(px(40.))
+        .gap(px(20.))
         .py(px(16.))
         .child(
             div()

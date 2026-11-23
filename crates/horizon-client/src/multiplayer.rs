@@ -656,37 +656,44 @@ impl Screen {
                 let x = ((w - 308.0) / 2.0).floor();
                 let saved = selected.is_some_and(|i| i < servers.len());
                 let label = |key: &str, fallback: &str| crate::lang::get_or(key, fallback);
-                vec![
-                    b(
-                        x,
-                        h - 52.0,
-                        100.0,
-                        &label("selectServer.select", "Join Server"),
-                        selected.is_some(),
-                        40,
-                    ),
-                    b(
-                        x + 104.0,
-                        h - 52.0,
-                        100.0,
-                        &label("selectServer.direct", "Direct Connection"),
-                        true,
-                        41,
-                    ),
-                    b(
-                        x + 208.0,
-                        h - 52.0,
-                        100.0,
-                        &label("selectServer.add", "Add Server"),
-                        true,
-                        42,
-                    ),
+                // A managed build's list is its supervisor's: no direct connection, no adding,
+                // editing or deleting, so Join sits alone in the middle (crate::managed).
+                let managed = crate::managed::on();
+                let mut buttons = vec![b(
+                    if managed { x + 104.0 } else { x },
+                    h - 52.0,
+                    100.0,
+                    &label("selectServer.select", "Join Server"),
+                    selected.is_some(),
+                    40,
+                )];
+                if !managed {
+                    buttons.extend([
+                        b(
+                            x + 104.0,
+                            h - 52.0,
+                            100.0,
+                            &label("selectServer.direct", "Direct Connection"),
+                            true,
+                            41,
+                        ),
+                        b(
+                            x + 208.0,
+                            h - 52.0,
+                            100.0,
+                            &label("selectServer.add", "Add Server"),
+                            true,
+                            42,
+                        ),
+                    ]);
+                }
+                buttons.extend([
                     b(
                         x,
                         h - 28.0,
                         74.0,
                         &label("selectServer.edit", "Edit"),
-                        saved,
+                        saved && !managed,
                         43,
                     ),
                     b(
@@ -694,7 +701,7 @@ impl Screen {
                         h - 28.0,
                         74.0,
                         &label("selectServer.delete", "Delete"),
-                        saved,
+                        saved && !managed,
                         44,
                     ),
                     b(
@@ -713,7 +720,8 @@ impl Screen {
                         true,
                         46,
                     ),
-                ]
+                ]);
+                buttons
             }
             Self::Edit { address, packs, .. } => vec![
                 // ManageServerScreen's CycleButton, above Done.

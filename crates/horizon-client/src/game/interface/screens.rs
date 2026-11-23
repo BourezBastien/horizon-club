@@ -233,7 +233,8 @@ const PLAYER_REPORTING: usize = 3;
 /// reporting only when the integrated server has a player besides us.
 fn icon_active(icon: usize, friends: bool, reporting: bool) -> bool {
     match icon {
-        0 | 1 => true,
+        // A managed build opens no link and has no friends (crate::managed).
+        0 | 1 => !horizon_client::managed::on(),
         FRIENDS_ICON => friends,
         PLAYER_REPORTING => reporting,
         _ => false,

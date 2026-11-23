@@ -142,6 +142,10 @@ audio = ["horizon-client-render/audio", "horizon-client-lib/audio"]
 # Controllers: gilrs, and the DualSense's and Xbox One's own output. Without it only `horizon-ctl pad`'s
 # virtual pad.
 controllers = ["horizon-client-lib/controllers", "dep:gilrs", "dep:horizon-dualsense", "horizon-client-input/controllers"]
+# A managed build for a school or a club: the launcher's rule (`--managed`) decides where the
+# game may connect, and Realms, Mods, Friends, Add Server and the control socket are gone
+# (managed.rs, docs/school-edition).
+managed = ["horizon-client-lib/managed"]
 # Horizon's own extras over the vanilla game, for a fork that wants them out (docs/forking.md):
 # cosmetics and emotes, the "Horizon player" presence, the official server added to
 # the server list, the Horizon Settings and Mods pages and Play with Friends. Players always get
