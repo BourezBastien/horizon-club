@@ -75,8 +75,20 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
-          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "${TAG#v}" --generate-notes --latest
+          # A release built again for an old tag must not become the one the launchers update to:
+          # "latest" goes to the newest version only, whichever was built last.
+          latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2>/dev/null || true)
+          version=${TAG#v}
+          if [ "$(printf '%s\n%s\n' "${latest#v}" "$version" | sort -V | tail -1)" = "$version" ]; then
+            make_latest=true
+          else
+            make_latest=false
+          fi
+          release=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json databaseId --jq .databaseId 2>/dev/null || true)
+          if [ -z "$release" ]; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$version" --generate-notes
+            release=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json databaseId --jq .databaseId)
           fi
           gh release upload "$TAG" out/HorizonClubLauncher.exe out/HorizonClub.exe out/club-admin.exe out/SHA256SUMS.txt \
             --repo "$GITHUB_REPOSITORY" --clobber
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$release" -F make_latest="$make_latest" --silent
