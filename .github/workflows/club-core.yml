@@ -18,7 +18,8 @@ on:
       - packaging/windows/DXC-NOTICE.txt
       - .github/workflows/club-core.yml
 
-permissions: contents: read
+permissions:
+  contents: read
 
 concurrency:
   group: club-core-${{ github.ref }}

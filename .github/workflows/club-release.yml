@@ -1,0 +1,82 @@
+name: club release
+# Builds the school edition's programs for Windows x64 and puts them in the release of the tag
+# that started it (docs/school-edition/README.md, « Publier une nouvelle version »):
+#
+#   HorizonClubLauncher.exe   the launcher, which goes to app\<version>\ on the club's share
+#   HorizonClub.exe           the bootstrap, which goes to the share's root
+#   club-admin.exe            the supervisor's tool, which goes to admin\
+#   SHA256SUMS.txt            the SHA-256 of each: a launcher installs an update only when it matches
+#
+# The tag is `v` and the launcher's version (launcher/Cargo.toml): the launchers on a club's share
+# compare theirs with it (launcher/src/update.rs), so a tag of another shape is refused here.
+# Nothing is downloaded from Mojang, and nothing of the game is built here (club-core.yml does
+# that): the game's files are prepared on the supervisor's computer.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: club-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # The C runtime inside the programs: a school's computer may have no Visual C++ Redistributable,
+  # and a program that needs VCRUNTIME140.dll does not start without it. The bootstrap carries the
+  # same flag in its own .cargo/config.toml.
+  RUSTFLAGS: -C target-feature=+crt-static
+
+jobs:
+  release:
+    name: the programs for Windows x64
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: rust
+        # `tr`: a file checked out with Windows' line ends would hand the toolchain a stray CR.
+        run: echo "version=$(tr -d '\r' < tools/ci/rust-version)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable, 2026-11
+        with:
+          toolchain: ${{ steps.rust.outputs.version }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: |
+            launcher
+            launcher/bootstrap
+      - name: The tag names the launcher's version
+        run: |
+          version=$(tr -d '\r' < launcher/Cargo.toml | sed -n 's/^version = "\(.*\)"$/\1/p' | head -1)
+          if [ "${GITHUB_REF_NAME}" != "v$version" ]; then
+            echo "::error::the tag is ${GITHUB_REF_NAME}, and the launcher's version is $version: tag it v$version"
+            exit 1
+          fi
+      - name: Build the launcher, club-admin and the bootstrap
+        run: |
+          cargo build --release --locked --manifest-path launcher/Cargo.toml --bin HorizonClubLauncher --bin club-admin
+          (cd launcher/bootstrap && cargo build --release --locked)
+      - name: The release's files and their SHA-256
+        run: |
+          mkdir -p out
+          cp launcher/target/release/HorizonClubLauncher.exe launcher/target/release/club-admin.exe out/
+          cp launcher/bootstrap/target/release/HorizonClub.exe out/
+          (cd out && sha256sum HorizonClubLauncher.exe HorizonClub.exe club-admin.exe > SHA256SUMS.txt)
+          cat out/SHA256SUMS.txt
+      - name: The release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "${TAG#v}" --generate-notes --latest
+          fi
+          gh release upload "$TAG" out/HorizonClubLauncher.exe out/HorizonClub.exe out/club-admin.exe out/SHA256SUMS.txt \
+            --repo "$GITHUB_REPOSITORY" --clobber
