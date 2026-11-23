@@ -3,7 +3,7 @@ use super::*;
 
 impl Launcher {
     pub(crate) fn drain(&mut self, cx: &mut Context<Self>) {
-        let mut changed = false;
+        let mut changed = self.update.poll();
         self.perf.tick();
         match self.bench.as_mut().map(|b| b.tick(&self.perf)) {
             Some(perf::Step::Go(page)) => {

@@ -57,7 +57,6 @@ impl Render for Launcher {
             self.bench_scroll(window);
         }
         self.servers.note_focus(window, cx);
-        self.update.poll();
         self.settings_query_focused = self.settings_query_focus.is_focused(window);
         let size = window.viewport_size();
         self.window_width = f32::from(size.width);

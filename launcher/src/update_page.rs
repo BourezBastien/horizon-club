@@ -50,11 +50,16 @@ impl Update {
         });
     }
 
-    /// Takes what the thread said since the frame before.
-    pub(super) fn poll(&mut self) {
+    /// Takes what the thread said since the time before: whether it said anything, so the window
+    /// that asks every 80 ms (`Launcher::drain`) draws it at once, and not at the pointer's next
+    /// move.
+    pub(super) fn poll(&mut self) -> bool {
+        let mut heard = false;
         while let Ok(step) = self.rx.try_recv() {
             self.step = Some(step);
+            heard = true;
         }
+        heard
     }
 }
 
