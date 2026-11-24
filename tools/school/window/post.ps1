@@ -1,10 +1,12 @@
-# Post a click or a mouse wheel straight to a window's message queue.
+# Post a click, a mouse move or a mouse wheel straight to a window's message queue.
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File post.ps1 -Process HorizonClubLauncher -Action click -At "307,443"
 #   powershell -NoProfile -ExecutionPolicy Bypass -File post.ps1 -Process HorizonClubLauncher -Action wheel -At "778,450" -Times 6
+#   powershell -NoProfile -ExecutionPolicy Bypass -File post.ps1 -Process HorizonClubLauncher -Action move -At "1155,18"
 #
 # -Process  the name of the process whose main window receives it
-# -Action   click, or wheel (it rolls down)
+# -Action   click, move (the pointer is only announced there: what is under it shows its hover,
+#           while the person's own pointer stays where it is), or wheel (it rolls down)
 # -At       a point in pixels from the window's top-left corner, as measured on a picture of the
 #           window taken by shot.ps1. Write it "x,y", quoted: a bare 307,443 would be read as
 #           the number 307443.
@@ -18,7 +20,7 @@
 [CmdletBinding()]
 param(
     [string]$Process = 'HorizonClubLauncher',
-    [Parameter(Mandatory = $true)][ValidateSet('wheel', 'click')][string]$Action,
+    [Parameter(Mandatory = $true)][ValidateSet('wheel', 'click', 'move')][string]$Action,
     [string]$At = '600,500',
     [int]$Times = 5,
     [int]$Id = 0
@@ -54,12 +56,20 @@ $point.X = $rect.Left + [int]$xy[0]
 $point.Y = $rect.Top + [int]$xy[1]
 [void][Post]::ScreenToClient($handle, [ref]$point)
 $place = [IntPtr](($point.Y -shl 16) -bor ($point.X -band 0xFFFF))
-if ($Action -eq 'wheel') {
-    # WM_MOUSEWHEEL: the high word of wParam is the wheel's step; negative rolls down.
+if ($Action -eq 'move') {
+    # WM_MOUSEMOVE alone, twice so the hover is certain to follow.
+    for ($n = 0; $n -lt 2; $n++) {
+        [void][Post]::PostMessage($handle, 0x0200, [IntPtr]::Zero, $place)
+        Start-Sleep -Milliseconds 150
+    }
+} elseif ($Action -eq 'wheel') {
+    # WM_MOUSEWHEEL: the high word of wParam is the wheel's step; negative rolls down. Unlike a
+    # move, its point counts from the screen's corner, not the window's.
     $step = [IntPtr](-120 -shl 16)
+    $onScreen = [IntPtr]((($rect.Top + [int]$xy[1]) -shl 16) -bor (($rect.Left + [int]$xy[0]) -band 0xFFFF))
     for ($n = 0; $n -lt $Times; $n++) {
         [void][Post]::PostMessage($handle, 0x0200, [IntPtr]::Zero, $place)
-        [void][Post]::PostMessage($handle, 0x020A, $step, $place)
+        [void][Post]::PostMessage($handle, 0x020A, $step, $onScreen)
         Start-Sleep -Milliseconds 80
     }
 } else {
