@@ -10,6 +10,10 @@
 //! The release's files are taken beside the program when they are there and are the release's
 //! (the supervisor downloaded them all), and downloaded from GitHub otherwise, each checked by
 //! its hash.
+//!
+//! The release holds no file of Minecraft's: the game comes from a folder the supervisor has
+//! (`--game`, else the program asks), a build already prepared, and it is put into `core\` with a
+//! data file of its own. Without one, the game is put there later with `club-admin install-core`.
 use super::*;
 
 /// What holds a folder.
@@ -57,8 +61,8 @@ fn on_a_share(folder: &Path) -> bool {
 /// `club-admin install`: the share found or asked for, then [`install_into`]. The exit code. A
 /// failure is said, and the window stays until Enter when nobody asked for silence: it opens by
 /// a double-click, and closes by itself otherwise before its last line is read.
-pub(super) fn run(given: Option<&Path>, yes: bool) -> i32 {
-    match install(given, yes) {
+pub(super) fn run(given: Option<&Path>, game: Option<PathBuf>, yes: bool) -> i32 {
+    match install(given, game, yes) {
         Ok(code) => code,
         Err(error) => {
             eprintln!("{error}");
@@ -76,7 +80,7 @@ fn wait_for_enter() {
     let _ = std::io::stdin().read_line(&mut line);
 }
 
-fn install(given: Option<&Path>, yes: bool) -> Result<i32, String> {
+fn install(given: Option<&Path>, game: Option<PathBuf>, yes: bool) -> Result<i32, String> {
     println!(
         "{}",
         tr(
@@ -127,35 +131,77 @@ fn install(given: Option<&Path>, yes: bool) -> Result<i32, String> {
             target
         }
     };
-    install_into(&target, &beside, yes)
+    if Kind::of(&target) == Kind::Local {
+        let said = trf(
+            "{folder} is {kind}: students' shortcuts would not find Horizon Club there. Install \
+             into it anyway, to try it?",
+            &[
+                ("folder", &target.display().to_string()),
+                ("kind", Kind::Local.said()),
+            ],
+        );
+        if !yes && !confirmed(&said)? {
+            return given_up();
+        }
+    }
+    // The game comes last: cancelling its question only leaves the game for later.
+    let game = match game {
+        Some(game) => Some(game),
+        None if yes => None,
+        None => ask_game(),
+    };
+    install_into(&target, &beside, game, yes)
 }
 
-/// The share's folder, as the supervisor says it: Windows' folder picker, then a typed path. The
-/// picker opens for a person at the keyboard only (a keyboard is a terminal on the program's
-/// input): from a script or a pipe nobody could close it.
+/// The folder of a game already prepared, when the supervisor has one: Windows' folder picker,
+/// then a typed path. None to put the game in place later.
+fn ask_game() -> Option<PathBuf> {
+    println!(
+        "{}",
+        tr(
+            "The release holds no file of Minecraft's: Horizon Club needs the game, from a folder \
+             that already has it (for example another install's core\\26.3-…).",
+        )
+    );
+    ask_a_folder(
+        tr("Where is the game? Choose the folder of a build already prepared."),
+        tr(
+            "Type the game folder's path (a build already prepared), or press Enter to put the \
+             game there later:",
+        ),
+    )
+}
+
+/// A folder as the supervisor says it: Windows' folder picker (titled `title`), then a typed
+/// path answering `typed`. The picker opens for a person at the keyboard only (a keyboard is a
+/// terminal on the program's input): from a script or a pipe nobody could close it.
 #[cfg(windows)]
-fn ask_folder() -> Option<PathBuf> {
+fn ask_a_folder(title: &str, typed: &str) -> Option<PathBuf> {
     use std::io::IsTerminal;
     if std::io::stdin().is_terminal() {
-        let question = tr("Where is the club's share? Choose its folder.");
-        if let Some(picked) = pick_folder(question) {
+        if let Some(picked) = pick_folder(title) {
             return Some(picked);
         }
     }
-    ask_typed()
+    ask_typed(typed)
 }
 
-/// The share's folder, typed: no folder picker on this system.
+/// A folder as the supervisor types it: no folder picker on this system.
 #[cfg(not(windows))]
-fn ask_folder() -> Option<PathBuf> {
-    ask_typed()
+fn ask_a_folder(title: &str, typed: &str) -> Option<PathBuf> {
+    let _ = title;
+    ask_typed(typed)
 }
 
-fn ask_typed() -> Option<PathBuf> {
-    println!(
-        "{}",
-        tr("Type the share's path (for example \\\\SERVEUR\\Horizon), or press Enter to give up:",)
-    );
+fn ask_folder() -> Option<PathBuf> {
+    ask_a_folder(
+        tr("Where is the club's share? Choose its folder."),
+        tr("Type the share's path (for example \\\\SERVEUR\\Horizon), or press Enter to give up:"),
+    )
+}
+
+fn ask_typed(prompt: &str) -> Option<PathBuf> {
+    println!("{prompt}");
     let mut line = String::new();
     let _ = std::io::stdin().read_line(&mut line);
     let typed = line.trim().trim_matches('"').to_string();
@@ -217,24 +263,26 @@ fn given_up() -> Result<i32, String> {
     Ok(1)
 }
 
+/// What became of the game (`put_game`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Game {
+    /// In `core\`, with a data file of its own: students can play.
+    There,
+    /// In `core\`, but its game files are not prepared.
+    ToPrepare,
+    /// Not put in place: later, with `club-admin install-core`.
+    Later,
+}
+
 /// Installs Horizon Club into `target`: the release's programs ([`update::setup`]), the folders
-/// a share holds, `club.toml` when there is none, and `managed.txt`. `yes` answers the one
-/// question a folder on this computer asks.
-fn install_into(target: &Path, beside: &Path, yes: bool) -> Result<i32, String> {
-    let kind = Kind::of(target);
-    if kind == Kind::Local {
-        let said = trf(
-            "{folder} is {kind}: students' shortcuts would not find Horizon Club there. Install \
-             into it anyway, to try it?",
-            &[
-                ("folder", &target.display().to_string()),
-                ("kind", kind.said()),
-            ],
-        );
-        if !yes && !confirmed(&said)? {
-            return given_up();
-        }
-    }
+/// a share holds, `club.toml` when there is none, `managed.txt`, then the game when the
+/// supervisor named a folder holding one.
+fn install_into(
+    target: &Path,
+    beside: &Path,
+    game: Option<PathBuf>,
+    yes: bool,
+) -> Result<i32, String> {
     // Everything the library writes now goes to the folder chosen, spelled as it was given.
     std::env::set_var("HORIZON_CLUB_ROOT", target);
     let release = newest_release(beside)?;
@@ -273,14 +321,26 @@ fn install_into(target: &Path, beside: &Path, yes: bool) -> Result<i32, String> 
             ],
         )
     );
+    let game = match game {
+        Some(game) => put_game(&game)?,
+        None => Game::Later,
+    };
     println!("{}", tr("What is left to do:"));
-    for step in [
-        tr("1. Put the game into core\\: club-admin install-core --from <the built game folder>."),
-        tr("2. Prepare the game's files, once, from a computer where Minecraft 26.3 is installed: club-admin prepare."),
-        tr("3. Correct club.toml (the club's name, its server's address), then: club-admin sync"),
-        tr("4. On the file server, tools/school/setup-share.ps1: students read everything and write in online\\ alone."),
-    ] {
-        println!("  {step}");
+    let mut steps: Vec<&str> = Vec::new();
+    if game == Game::Later {
+        steps.push(tr(
+            "Put the game into core\\: club-admin install-core --from <the built game folder>.",
+        ));
+    }
+    if game != Game::There {
+        steps.push(tr("Prepare the game's files, once, from a computer where Minecraft 26.3 is installed: club-admin prepare."));
+    }
+    steps.extend([
+        tr("Correct club.toml (the club's name, its server's address), then: club-admin sync"),
+        tr("On the file server, tools/school/setup-share.ps1: students read everything and write in online\\ alone."),
+    ]);
+    for step in steps {
+        println!("  • {step}");
     }
     let bootstrap = installed
         .files
@@ -289,9 +349,9 @@ fn install_into(target: &Path, beside: &Path, yes: bool) -> Result<i32, String> 
         .cloned()
         .unwrap_or_else(|| target.join(update::BOOTSTRAP));
     println!(
-        "  {}",
+        "  • {}",
         trf(
-            "5. On each PC, a shortcut to {file}.",
+            "On each PC, a shortcut to {file}.",
             &[("file", &bootstrap.display().to_string())],
         )
     );
@@ -299,6 +359,74 @@ fn install_into(target: &Path, beside: &Path, yes: bool) -> Result<i32, String> 
         wait_for_enter();
     }
     Ok(0)
+}
+
+/// Puts the game of the folder `from` into `core\` ([`install_build`]), then writes its data
+/// file. A folder that is already in `core\` is kept as it is. A folder that holds no game is
+/// not one: the game is left for later, and said.
+fn put_game(named: &Path) -> Result<Game, String> {
+    let program = if cfg!(windows) {
+        "horizon-client.exe"
+    } else {
+        "horizon-client"
+    };
+    let mut from = named.to_path_buf();
+    // The folder that holds the builds (a core\ folder) may be named for the one build in it.
+    if !from.join(program).is_file() {
+        let builds: Vec<PathBuf> = fs::read_dir(&from)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.join(program).is_file())
+            .collect();
+        if let [only] = builds.as_slice() {
+            from = only.clone();
+        }
+    }
+    if !from.join(program).is_file() {
+        println!(
+            "{}",
+            trf(
+                "{folder} holds no horizon-client.exe, so it is not a game's build: the game \
+                 will be put in place later.",
+                &[("folder", &from.display().to_string())],
+            )
+        );
+        return Ok(Game::Later);
+    }
+    let tag = from
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if club::versions_dir().join(&tag).join(program).is_file() {
+        println!(
+            "{}",
+            trf(
+                "core\\{tag} is already there: the game is kept.",
+                &[("tag", &tag)]
+            )
+        );
+    } else {
+        println!(
+            "{}",
+            trf(
+                "Copying the game from {folder}… It takes a few minutes.",
+                &[("folder", &from.display().to_string())]
+            )
+        );
+        let tag = install_build(&club::versions_dir(), &from, None)?;
+        println!("{}", trf("The game is in core\\{tag}.", &[("tag", &tag)]));
+    }
+    // The build's files may not be prepared (a build straight from the workflow): then there is
+    // no data file to write, and `prepare` is one of the steps said at the end.
+    match data_file(&tag) {
+        Ok(()) => Ok(Game::There),
+        Err(why) => {
+            println!("{why}");
+            Ok(Game::ToPrepare)
+        }
+    }
 }
 
 /// The release to install: GitHub's newest; offline, the one whose files sit beside the

@@ -135,14 +135,18 @@ Trois étapes, la première et la troisième avec les droits d'un administrateur
    | `online\` | les serveurs hébergés par les élèves, annoncés là, et `online\people\` | écrit | écrit |
    | `admin\` | `club-admin.exe` | seul | aucun droit |
 
-2. **Installer** : ouvrir `HorizonClubSetup.exe` (dans la release, voir plus bas). Horizon Club s'installe une seule fois, sur le partage, jamais sur un poste d'élève, et l'installateur ne s'en remet pas au hasard du dossier d'où il est lancé :
+2. **Installer** : ouvrir `HorizonClubSetup.exe` (dans la release, voir plus bas), et lui seul. Les autres fichiers de la release ne se lancent pas seuls : `HorizonClub.exe` cherche `app\current.txt` à côté de lui, et `HorizonClubLauncher.exe` a besoin de `club.toml` et du jeu ; c'est le dossier entier qui fait Horizon Club. Horizon Club s'installe une seule fois, sur le partage, jamais sur un poste d'élève, et l'installateur ne s'en remet pas au hasard du dossier d'où il est lancé :
    - lancé depuis le partage (un chemin `\\SERVEUR\Horizon` ou un lecteur réseau mappé), il s'installe là, après une confirmation ;
    - lancé depuis un dossier de l'ordinateur, il demande où est le partage : la fenêtre de Windows « choisir un dossier » s'ouvre, et à défaut le chemin se tape ;
    - un dossier qui est sur l'ordinateur n'est utilisé que si le responsable le confirme (« pour un essai »).
 
-   Il pose l'amorce à la racine, le launcher dans `app\<version>\` avec `current.txt`, `club-admin.exe` dans `admin\`, écrit `managed.txt`, un `club.toml` modèle s'il n'y en a pas, et crée `core\` et `online\people\`. Les fichiers de la release posés à côté de lui servent tels quels (installation sans réseau) ; sinon il les télécharge de GitHub ; dans les deux cas chacun est vérifié par son empreinte. En ligne de commande : `admin\club-admin.exe install --root \\SERVEUR\Horizon` (`--yes` pour un script).
+   Il pose l'amorce à la racine, le launcher dans `app\<version>\` avec `current.txt`, `club-admin.exe` dans `admin\`, écrit `managed.txt`, un `club.toml` modèle s'il n'y en a pas, et crée `core\` et `online\people\`. Les fichiers de la release posés à côté de lui servent tels quels (installation sans réseau) ; sinon il les télécharge de GitHub ; dans les deux cas chacun est vérifié par son empreinte.
 
-   Il reste alors, et l'installateur le dit : `club-admin install-core --from <dossier du jeu construit>` puis `club-admin prepare` pour le jeu, corriger `club.toml` puis `club-admin sync`, `tools/school/setup-share.ps1` pour les droits, et le raccourci sur chaque poste.
+   Il demande ensuite **où est le jeu**. La release n'en contient aucun fichier : le jeu vient d'un dossier qui l'a déjà, un build préparé (par exemple le `core\26.3-…` d'une autre installation). L'installateur le copie dans `core\` et écrit son `horizon-data.bin` pour le dossier du club : quelques minutes. Annuler laisse le jeu à poser plus tard avec `club-admin install-core --from <dossier>`.
+
+   En ligne de commande : `admin\club-admin.exe install --root \\SERVEUR\Horizon --game <dossier du jeu>` (`--yes` pour un script).
+
+   Il reste alors, et l'installateur le dit : corriger `club.toml` puis `club-admin sync`, `tools/school/setup-share.ps1` pour les droits, et le raccourci sur chaque poste. `admin\club-admin.exe check` dit ensuite si le dossier est prêt.
 
 3. **Chaque poste** (`tools/school/setup-pc.ps1`, à la main ou par stratégie de groupe) : le raccourci sur le bureau commun et deux règles de pare-feu, entrantes depuis le réseau local seulement : TCP 25565 à 25575 (les serveurs hébergés depuis la page Serveurs) et UDP 4445 (la découverte des mondes ouverts au réseau local). **Ce script n'a pas pu être essayé** : il demande les droits d'administrateur et modifie la machine.
 
@@ -177,5 +181,5 @@ Sans le workflow, une release se fait à la main, avec les mêmes fichiers (c'es
 - Aucun fichier Mojang n'entre dans le dépôt. Le responsable les prépare une fois avec `club-admin prepare`, depuis sa propre installation ou depuis Mojang.
 - L'identifiant Azure d'Horizon est interdit aux forks. L'édition n'a pas de comptes : le point ne se pose pas.
 - Le verrouillage absolu est réseau : le pare-feu ou le proxy du collège, plus une règle Windows entrante TCP 25565-25575 pour les serveurs hébergés.
-- `horizon-data.bin` mémorise le chemin exact de son dossier : il doit être écrit sur le partage, par le chemin que voient les élèves.
+- `horizon-data.bin` mémorise le chemin exact de son dossier : il doit être écrit sur le partage, par le chemin que voient les élèves. Un build posé avec `club-admin install-core` ou l'installateur n'emporte donc pas celui de son ancien dossier : il en reçoit un nouveau. Un dossier copé à la main garde l'ancien, que le jeu ignore : chaque démarrage lit alors ses 22 000 fichiers un par un, des minutes au lieu de quelques secondes (mesuré sur un même PC : 104 s contre 3 s). `club-admin check` le signale, et `club-admin data-file --tag <build>` le réécrit.
 - Les exécutions de test du jeu et du launcher se font dans des dossiers temporaires (`HORIZON_HOME`, `HORIZON_LAUNCHER_HOME`, `XDG_*`), jamais dans les données d'un vrai joueur.

@@ -69,10 +69,15 @@ enum Command {
         bootstrap: Option<PathBuf>,
     },
     /// Install Horizon Club on the club's share from the start: the launcher, the bootstrap and
-    /// this tool, the share's folders, club.toml and managed.txt. Where --root says; else on the
-    /// share this program sits on; else it asks, with Windows' folder picker. A folder on this
-    /// computer is used only to try, and it asks first. --yes answers yes to every question.
+    /// this tool, the share's folders, club.toml and managed.txt, then the game when --game names
+    /// a folder holding a build already prepared (else it asks, and cancelling leaves the game
+    /// for club-admin install-core). Where --root says; else on the share this program sits on;
+    /// else it asks, with Windows' folder picker. A folder on this computer is used only to try,
+    /// and it asks first. --yes answers yes to every question.
     Install {
+        /// A folder holding a game build already prepared, to put into core\.
+        #[arg(long)]
+        game: Option<PathBuf>,
         #[arg(long)]
         yes: bool,
     },
@@ -134,9 +139,9 @@ fn main() {
     }
     let cli = Cli::parse_from(args);
     // The installer finds or asks for the club's folder itself: none is resolved for it.
-    if let Command::Install { yes } = &cli.command {
+    if let Command::Install { game, yes } = &cli.command {
         i18n::set(i18n::Language::French);
-        std::process::exit(installer::run(cli.root.as_deref(), *yes));
+        std::process::exit(installer::run(cli.root.as_deref(), game.clone(), *yes));
     }
     let root = match resolve_root(cli.root.as_deref()) {
         Ok(root) => root,
@@ -337,38 +342,7 @@ fn run(
         Command::Update { check } => update_the_share(root, *check),
         Command::Install { .. } => unreachable!("handled before the club's folder is resolved"),
         Command::InstallCore { from, tag } => {
-            let tag = tag
-                .clone()
-                .or_else(|| from.file_name().map(|n| n.to_string_lossy().into_owned()))
-                .ok_or_else(|| tr("The folder to install from has no name.").to_string())?;
-            let target = club::versions_dir().join(&tag);
-            if target.exists() {
-                return Err(trf(
-                    "core\\{tag} is already there. Take it away first, or install under \
-                     another tag.",
-                    &[("tag", &tag)],
-                )
-                .to_string());
-            }
-            fs::create_dir_all(&target).map_err(|e| format!("{}: {e}", target.display()))?;
-            copy_folder(from, &target).map_err(|e| {
-                trf(
-                    "Could not copy {from} into core\\{tag}: {error}",
-                    &[
-                        ("from", &from.display().to_string()),
-                        ("tag", &tag),
-                        ("error", &e),
-                    ],
-                )
-            })?;
-            println!(
-                "{}",
-                trf(
-                    "Installed {from} as core\\{tag}.",
-                    &[("from", &from.display().to_string()), ("tag", &tag),]
-                )
-            );
-            data_file(&tag)?;
+            install_core(from, tag.clone())?;
             Ok(0)
         }
         Command::DataFile { tag } => {
@@ -396,7 +370,80 @@ fn run(
     }
 }
 
-// ----- update -------------------------------------------------------------------------------------
+// ----- the game's build -----------------------------------------------------------------------------
+
+/// The file the game's files are grouped in, in a prepared folder: it belongs to the folder it
+/// was written in (it names that folder), so it is never carried into another one.
+const DATA_FILE: &str = horizon_platform::prepared_files::FILE_NAME;
+
+/// Puts a built game folder into `core\<tag>\`: `tag`, else the folder's own name. Then the
+/// build's data file is written ([`data_file`]), when the folder's game files are prepared. The
+/// tag the build was installed under.
+pub(crate) fn install_core(from: &Path, tag: Option<String>) -> Result<String, String> {
+    let tag = install_build(&club::versions_dir(), from, tag)?;
+    data_file(&tag)?;
+    Ok(tag)
+}
+
+/// [`install_core`]'s copy: the folder into `core\<tag>\`, without the data file it may hold. The
+/// tag the build was installed under.
+pub(crate) fn install_build(
+    core: &Path,
+    from: &Path,
+    tag: Option<String>,
+) -> Result<String, String> {
+    let tag = tag
+        .or_else(|| from.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .ok_or_else(|| tr("The folder to install from has no name.").to_string())?;
+    // The tag is a folder's name, as the launcher reads the builds of core\: it cannot leave it.
+    let plain = !tag.is_empty()
+        && tag.len() <= 64
+        && tag
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        && tag != "."
+        && tag != "..";
+    if !plain {
+        return Err(trf(
+            "\"{tag}\" is not a build's name: letters, digits, dots, dashes and underscores.",
+            &[("tag", &tag)],
+        ));
+    }
+    let target = core.join(&tag);
+    if target.exists() {
+        return Err(trf(
+            "core\\{tag} is already there. Take it away first, or install under another tag.",
+            &[("tag", &tag)],
+        ));
+    }
+    fs::create_dir_all(&target).map_err(|e| format!("{}: {e}", target.display()))?;
+    copy_folder_without(from, &target, DATA_FILE).map_err(|e| {
+        trf(
+            "Could not copy {from} into core\\{tag}: {error}",
+            &[
+                ("from", &from.display().to_string()),
+                ("tag", &tag),
+                ("error", &e),
+            ],
+        )
+    })?;
+    println!(
+        "{}",
+        trf(
+            "Installed {from} as core\\{tag}.",
+            &[("from", &from.display().to_string()), ("tag", &tag)]
+        )
+    );
+    Ok(tag)
+}
+
+/// Whether a prepared folder's data file is there and is this folder's. One written for another
+/// folder (the build was copied from elsewhere) is left alone by the game, which then reads its
+/// 22,000 files one by one: minutes instead of seconds, at every start.
+fn data_file_usable(resources: &Path) -> bool {
+    resources.join(DATA_FILE).is_file()
+        && horizon_platform::prepared_files::open(resources).is_some()
+}
 
 /// `club-admin update`: the share's launcher brought to the club's newest release
 /// (`horizon_launcher::update`). The version in use is the one `app\current.txt` names.
@@ -464,9 +511,7 @@ fn check(root: &Path, config: Result<&config::Config, &config::Error>) -> Result
             game_version: backend::game_version(name),
             prepared: backend::check_prepared(name),
             dxcompiler: backend::version_dir(name).join("dxcompiler.dll").is_file(),
-            data_file: backend::resources(name)
-                .join(horizon_platform::prepared_files::FILE_NAME)
-                .is_file(),
+            data_file: data_file_usable(&backend::resources(name)),
             server_program: backend::version_dir(name)
                 .join(if cfg!(windows) {
                     "horizon-server.exe"
@@ -573,16 +618,28 @@ fn the_build(
 fn data_file(tag: &str) -> Result<(), String> {
     warn_mapped_drive();
     let resources = backend::resources(tag);
-    let file = resources.join(horizon_platform::prepared_files::FILE_NAME);
+    let file = resources.join(DATA_FILE);
     if file.is_file() {
+        if data_file_usable(&resources) {
+            println!(
+                "{}",
+                trf(
+                    "{file} is already there.",
+                    &[("file", &file.display().to_string())]
+                )
+            );
+            return Ok(());
+        }
+        // Written for another folder, as when the build was copied from elsewhere: the game
+        // would leave it alone and read its files one by one.
         println!(
             "{}",
             trf(
-                "{file} is already there.",
+                "{file} was written for another folder: it is written again for this one.",
                 &[("file", &file.display().to_string())]
             )
         );
-        return Ok(());
+        fs::remove_file(&file).map_err(|e| format!("{}: {e}", file.display()))?;
     }
     if !backend::check_prepared(tag) {
         return Err(trf(
@@ -745,14 +802,18 @@ fn write_atomic(path: &Path, text: &str) -> Result<(), String> {
     fs::rename(&partial, path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// A folder copied whole, files and folders both.
-fn copy_folder(from: &Path, to: &Path) -> Result<(), String> {
+/// A folder copied whole, files and folders both, but for any file named `without`: a file
+/// that belongs to the folder it was written in is not carried into another one.
+fn copy_folder_without(from: &Path, to: &Path, without: &str) -> Result<(), String> {
     fs::create_dir_all(to).map_err(|e| format!("{}: {e}", to.display()))?;
     for entry in fs::read_dir(from).map_err(|e| format!("{}: {e}", from.display()))? {
         let entry = entry.map_err(|e| e.to_string())?;
+        if entry.file_name() == without {
+            continue;
+        }
         let target = to.join(entry.file_name());
         if entry.file_type().map_err(|e| e.to_string())?.is_dir() {
-            copy_folder(&entry.path(), &target)?;
+            copy_folder_without(&entry.path(), &target, without)?;
         } else {
             fs::copy(entry.path(), &target)
                 .map_err(|e| format!("{}: {e}", entry.path().display()))?;
@@ -798,4 +859,72 @@ fn mapped_drive_letter(root: &Path) -> bool {
     // mapping no session has reconnected yet — still a mapped drive.
     let code = unsafe { WNetGetConnectionW(drive.as_ptr(), target.as_mut_ptr(), &mut length) };
     code == 0 || code == 1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let folder =
+            std::env::temp_dir().join(format!("horizon-club-admin-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&folder);
+        folder
+    }
+
+    /// A build copied into `core\` leaves its data file behind: that file names the folder it
+    /// was written in, and the game reads its files one by one rather than use it elsewhere
+    /// (measured: 104 seconds instead of 4).
+    #[test]
+    fn a_build_is_installed_without_the_data_file_of_its_old_folder() {
+        let root = scratch("install-core");
+        let from = root.join("26.3-20261122");
+        let files = from.join(".local").join("horizon-client").join("26.3");
+        fs::create_dir_all(from.join("LICENSES")).unwrap();
+        fs::create_dir_all(&files).unwrap();
+        fs::write(from.join("horizon-client.exe"), "MZ the game").unwrap();
+        fs::write(from.join("LICENSES").join("a.txt"), "licence").unwrap();
+        fs::write(files.join("asset-index.json"), "{}").unwrap();
+        fs::write(files.join(DATA_FILE), "written for another folder").unwrap();
+
+        let core = root.join("core");
+        assert_eq!(
+            install_build(&core, &from, None).unwrap(),
+            "26.3-20261122",
+            "the folder's name is the tag"
+        );
+        let installed = core.join("26.3-20261122");
+        assert_eq!(
+            fs::read_to_string(installed.join("horizon-client.exe")).unwrap(),
+            "MZ the game"
+        );
+        assert!(installed.join("LICENSES").join("a.txt").is_file());
+        let copied = installed.join(".local").join("horizon-client").join("26.3");
+        assert!(copied.join("asset-index.json").is_file());
+        assert!(
+            !copied.join(DATA_FILE).exists(),
+            "the data file of the old folder is not carried"
+        );
+        // The folder it was copied from keeps its own.
+        assert!(files.join(DATA_FILE).is_file());
+
+        // The same tag twice is refused, and so is a tag that would leave core\.
+        assert!(install_build(&core, &from, None).is_err());
+        assert!(install_build(&core, &from, Some("../elsewhere".into())).is_err());
+        assert!(install_build(&core, &from, Some("a/b".into())).is_err());
+        assert!(!root.join("elsewhere").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A file that is not a data file of its folder counts for none, as one written for another
+    /// folder does: the check then says to write it again.
+    #[test]
+    fn a_data_file_that_is_not_this_folder_s_counts_for_none() {
+        let resources = scratch("data-file");
+        fs::create_dir_all(&resources).unwrap();
+        assert!(!data_file_usable(&resources), "nothing there");
+        fs::write(resources.join(DATA_FILE), "not a data file").unwrap();
+        assert!(!data_file_usable(&resources));
+        let _ = fs::remove_dir_all(&resources);
+    }
 }

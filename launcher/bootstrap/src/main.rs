@@ -144,9 +144,11 @@ impl Message {
                 "Horizon Club : impossible de trouver cet exécutable ({0}).",
                 "Horizon Club: cannot find this executable ({0}).",
             ),
+            // What a supervisor who opened this program before installing needs to read: the
+            // installer makes the folder; a student shows the line to the supervisor.
             NoCurrent => (
-                "Horizon Club : {0} est introuvable. Préviens le responsable du club.",
-                "Horizon Club: {0} was not found. Tell the club's supervisor.",
+                "Horizon Club n'est pas installé dans ce dossier ({0} est introuvable). Le responsable du club doit ouvrir HorizonClubSetup.exe une seule fois, dans le dossier du club.",
+                "Horizon Club is not installed in this folder ({0} was not found). The club's supervisor has to open HorizonClubSetup.exe once, in the club's folder.",
             ),
             BadCurrent => (
                 "Horizon Club : {0} ne donne pas une version valide. Préviens le responsable du club.",

@@ -13,7 +13,9 @@
 
 ## Commencer
 
-Ouvrir **`HorizonClubSetup.exe`** (dans [Releases](../../releases)) : il installe l'édition sur le partage du club, et jamais sur un poste d'élève. Lancé depuis le partage, il s'installe là ; depuis ailleurs, il demande où est le partage.
+Ouvrir **`HorizonClubSetup.exe`** (dans [Releases](../../releases)), et lui seul : les autres fichiers de la release ne se lancent pas seuls, c'est le dossier entier qui fait Horizon Club. Il installe l'édition sur le partage du club, jamais sur un poste d'élève. Lancé depuis le partage, il s'installe là ; depuis ailleurs, il demande où est le partage.
+
+Il demande ensuite **où est le jeu** : la release n'en contient aucun fichier de Minecraft, il vient d'un dossier qui l'a déjà (un build préparé). L'installateur le copie dans `core\`, et les élèves peuvent jouer.
 
 Le reste est expliqué dans **[docs/school-edition/README.md](docs/school-edition/README.md)** : construire, installer, déployer sur les postes, mettre à jour.
 

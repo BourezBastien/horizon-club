@@ -16,8 +16,9 @@ pub struct Build {
     /// `dxcompiler.dll` sits beside the game's program (DirectX 12 compiles its shaders with it,
     /// on the integrated GPUs the club's PCs have).
     pub dxcompiler: bool,
-    /// `horizon-data.bin` is in the prepared folder, so a start over the network opens one file,
-    /// not about 22,000.
+    /// A `horizon-data.bin` of this very folder is in the prepared folder, so a start over the
+    /// network opens one file, not about 22,000. One written for another folder (the build was
+    /// copied from elsewhere) is left alone by the game, so it counts for none.
     pub data_file: bool,
     /// `horizon-server.exe` is beside the game's program, so students can host with it.
     pub server_program: bool,
@@ -118,9 +119,9 @@ pub fn verdicts(facts: &Facts) -> Vec<Finding> {
             }
             if !build.data_file {
                 out.push(Finding::ok(trf(
-                    "{tag} has no horizon-data.bin: the game still plays, but a first start over \
-                     the network opens about 22,000 files instead of one. Run: club-admin \
-                     data-file --tag {tag}",
+                    "{tag} has no horizon-data.bin of its own: the game still plays, but every \
+                     start reads about 22,000 files instead of one, minutes instead of seconds. \
+                     Run: club-admin data-file --tag {tag}",
                     &[("tag", active)],
                 )));
             }
