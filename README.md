@@ -7,17 +7,21 @@
 - **Une fenêtre, un bouton Jouer.** Le nom du joueur vient de la session Windows de l'élève.
 - **Le réseau du club seulement.** Les élèves rejoignent les serveurs que le responsable inscrit dans `club.toml`, et ceux que d'autres élèves hébergent sur le réseau local.
 - **Héberger un serveur en quelques clics** depuis la page Serveurs : le créer (survie, créatif, aventure), le démarrer, dire qui peut entrer, changer ses réglages, le sauvegarder.
+- **Des amis, sans taper de nom.** Qui peut entrer dans un serveur se choisit sur des cartes : une par ami, une par élève qui a son launcher ouvert. Chaque nouveau serveur laisse entrer les amis dès sa création, et la barre latérale garde les serveurs des amis et ceux où l'élève a joué.
 - **Installé une seule fois.** Tout est sur un partage (`\\serveur\Horizon\`) ; un raccourci sur le bureau de chaque poste suffit. Les mondes et les réglages d'un élève restent sur son poste.
 - **Mis à jour au même endroit.** Le launcher vit en un seul exemplaire sur le partage : une mise à jour là-bas, et chaque poste a la nouvelle version à son ouverture suivante.
 
 ## Commencer
 
-Tout est expliqué dans **[docs/school-edition/README.md](docs/school-edition/README.md)** : construire, organiser le partage, déployer sur les postes, mettre à jour.
+Ouvrir **`HorizonClubSetup.exe`** (dans [Releases](../../releases)) : il installe l'édition sur le partage du club, et jamais sur un poste d'élève. Lancé depuis le partage, il s'installe là ; depuis ailleurs, il demande où est le partage.
+
+Le reste est expliqué dans **[docs/school-edition/README.md](docs/school-edition/README.md)** : construire, installer, déployer sur les postes, mettre à jour.
 
 Les exécutables d'une version sont dans [Releases](../../releases) :
 
 | Fichier | Rôle | Où sur le partage |
 |---|---|---|
+| `HorizonClubSetup.exe` | l'installateur : à ouvrir une seule fois, sur le partage | il pose lui-même le reste |
 | `HorizonClub.exe` | l'amorce : la cible du raccourci de chaque poste | racine |
 | `HorizonClubLauncher.exe` | le launcher | `app\<version>\` |
 | `club-admin.exe` | l'outil en ligne de commande du responsable | `admin\` |
