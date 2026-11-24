@@ -1,6 +1,6 @@
 [package]
 name = "horizon-launcher"
-version = "0.4.2"
+version = "0.4.3"
 edition = "2021"
 license = "LGPL-3.0-or-later"
 description = "The club's launcher: lists its game builds and starts the game, or a server a student hosts"
@@ -80,9 +80,10 @@ futures-lite = "2"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["NSAccessibility", "NSAppearance", "NSView", "NSWindow", "NSWorkspace"] }
 raw-window-handle = "0.6"
 [target.'cfg(target_os = "windows")'.dependencies]
-# Whether a process is still running (`backend::process_alive`), and whether the club root was
-# given as a mapped drive (`club_admin`'s data-file warning); already in the lockfile.
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_NetworkManagement_WNet", "Win32_NetworkManagement"] }
+# Whether a process is still running (`backend::process_alive`), whether the club root was
+# given as a mapped drive (`club_admin`'s data-file warning), and the colours of what `club_admin`
+# says in its window; already in the lockfile.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_Console", "Win32_NetworkManagement_WNet", "Win32_NetworkManagement"] }
 
 [target.'cfg(windows)'.build-dependencies]
 # The icon resource in the .exe (build.rs).
