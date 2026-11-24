@@ -58,9 +58,13 @@ fn create_asks_init_and_config_set() {
     } else {
         "core/v1/.local/horizon-client/26.3"
     };
-    // ...and every player is put in the server's mode, whatever an earlier visit saved for them.
+    // ...every player is put in the server's mode, whatever an earlier visit saved for them,
+    // and the world is backed up every ten minutes: a club's session is shorter than the
+    // supervisor's own period.
     assert!(
-        args.ends_with(&format!("{tail} properties.force-gamemode=true")),
+        args.ends_with(&format!(
+            "{tail} backups.every=10m properties.force-gamemode=true"
+        )),
         "{args}"
     );
 }
@@ -280,12 +284,40 @@ fn the_game_mode_comes_from_server_toml() {
     assert_eq!(game_mode(&dir), None);
     fs::write(
         dir.join("server.toml"),
-        "[server]\nport = 25565\n\n[world]\nname = \"world\"\ngame_mode = \"creative\"\n",
+        "[server]\nport = 25565\nmax_players = 8\n\n[world]\nname = \"world\"\ngame_mode = \"creative\"\n",
     )
     .unwrap();
     assert_eq!(game_mode(&dir).as_deref(), Some("creative"));
+    // A number is read as the line it prints.
+    assert_eq!(
+        file_setting(&dir, "server", "max_players").as_deref(),
+        Some("8")
+    );
+    assert_eq!(file_setting(&dir, "server", "motd"), None);
     fs::write(dir.join("server.toml"), "[server]\nport = 25565\n").unwrap();
     assert_eq!(game_mode(&dir), None);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// What the lists say of a stopped server: how many backups its folder holds, finished ones
+/// only (`horizon-server backups` lists `*.zip`).
+#[test]
+fn a_servers_backups_are_counted_from_its_folder() {
+    let dir = scratch("backups-count");
+    assert_eq!(backup_count(&dir), 0, "no backups folder yet");
+    let backups = dir.join("backups");
+    fs::create_dir_all(&backups).unwrap();
+    for name in [
+        "2026-11-24_10-00-00-auto.zip",
+        "2026-11-24_10-10-00-auto.zip",
+        "2026-11-24_10-15-00-my-world.zip",
+        "2026-11-24_10-20-00-auto.zip.part",
+        "notes.txt",
+    ] {
+        fs::write(backups.join(name), "x").unwrap();
+    }
+    fs::create_dir_all(backups.join("old.zip")).unwrap();
+    assert_eq!(backup_count(&dir), 3);
     let _ = fs::remove_dir_all(&dir);
 }
 

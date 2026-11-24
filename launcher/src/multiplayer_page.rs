@@ -81,7 +81,12 @@ impl Launcher {
         // here without restarting the launcher.
         let changed = self.reload_club();
         let announced = online::list(&club::online_dir(), server_list::now());
-        match server_list::write_club_list(&backend::game_home(), &self.config, &announced) {
+        match server_list::write_club_list(
+            &backend::game_home(),
+            &self.config,
+            &announced,
+            &self.servers.remembered(),
+        ) {
             Ok(servers) => {
                 self.multiplayer.list = servers
                     .into_iter()
@@ -212,6 +217,8 @@ impl Launcher {
         } else {
             let ip = server.ip.clone();
             join.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                // Remembered among the invited servers: the student finds it again once it stops.
+                this.remember_joined(&ip);
                 this.quick_play("--server", ip.clone());
                 cx.notify();
             }))

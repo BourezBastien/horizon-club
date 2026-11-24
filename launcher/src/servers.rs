@@ -38,13 +38,33 @@ pub struct Entry {
 /// The game mode a server's `server.toml` sets (`[world] game_mode`), read from the file
 /// without asking `horizon-server`: the Servers page's list says it for each stopped server.
 pub fn game_mode(dir: &Path) -> Option<String> {
+    file_setting(dir, "world", "game_mode")
+}
+
+/// A setting a server's `server.toml` holds, read from the file without asking `horizon-server`:
+/// the page's lists say of a stopped server what it will be, without starting it.
+pub fn file_setting(dir: &Path, section: &str, key: &str) -> Option<String> {
     let text = fs::read_to_string(dir.join("server.toml")).ok()?;
     let config: toml::Value = toml::from_str(&text).ok()?;
-    config
-        .get("world")?
-        .get("game_mode")?
+    let value = config.get(section)?.get(key)?;
+    value
         .as_str()
         .map(str::to_string)
+        .or_else(|| value.as_integer().map(|n| n.to_string()))
+}
+
+/// How many finished backups a server's folder holds (`backups\*.zip`, as `horizon-server
+/// backups` counts them), read from the folder alone.
+pub fn backup_count(dir: &Path) -> usize {
+    fs::read_dir(dir.join("backups"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| {
+            entry.file_type().is_ok_and(|t| t.is_file())
+                && entry.path().extension().is_some_and(|e| e == "zip")
+        })
+        .count()
 }
 
 fn list_file() -> PathBuf {
@@ -213,6 +233,17 @@ pub fn command(tag: &str, dir: &Path, args: &[&str]) -> Result<Command, String> 
 
 fn supervisor_log(dir: &Path) -> PathBuf {
     dir.join("logs/supervisor.log")
+}
+
+/// The last `lines` of the server's log, where it says why the game didn't start: shown in the
+/// window, so no student has to open the folder.
+pub fn log_tail(dir: &Path, lines: usize) -> Vec<String> {
+    let text = fs::read_to_string(supervisor_log(dir)).unwrap_or_default();
+    let all: Vec<&str> = text.lines().collect();
+    all[all.len().saturating_sub(lines)..]
+        .iter()
+        .map(|l| l.to_string())
+        .collect()
 }
 
 fn log_length(dir: &Path) -> u64 {
@@ -575,6 +606,12 @@ pub fn init_args(spec: &NewServer, world: &str, port: u16) -> Vec<String> {
 /// `defaultgamemode` only reaches a player's first join.
 const FORCE_MODE: (&str, &str) = ("properties.force-gamemode", "true");
 
+/// `backups.every` of a hosted server, and what its switch sets back on. The supervisor's own
+/// period (6 hours) is for a server that runs all day: it counts from the server's start, so a
+/// club that meets for half an hour would never see a backup. Ten minutes gives three or four per
+/// session, and the last 12 stay (`backups.keep`).
+pub const AUTO_BACKUP: &str = "10m";
+
 /// The `horizon-server config set` arguments that finish a new server: its settings, offline
 /// mode, no web panel, and the build's prepared game files (`[engine] resources`).
 pub fn settings_args(spec: &NewServer, resources: &Path) -> Vec<String> {
@@ -588,6 +625,7 @@ pub fn settings_args(spec: &NewServer, resources: &Path) -> Vec<String> {
         "server.online_mode=false".into(),
         "panel.bind=".into(),
         format!("engine.resources={}", resources.display()),
+        format!("backups.every={AUTO_BACKUP}"),
         format!("{}={}", FORCE_MODE.0, FORCE_MODE.1),
     ]
 }

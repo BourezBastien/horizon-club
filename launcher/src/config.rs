@@ -86,6 +86,10 @@ pub struct Game {
     pub simulation_distance: u32,
     /// `maxFps`.
     pub max_fps: u32,
+    /// `guiScale`: the size of the game's interface. `0` lets the game choose; on a school
+    /// computer it chose one too small to read, so the club's is 2, as vanilla's slider offers
+    /// from 1 to 4.
+    pub gui_scale: u32,
 }
 
 impl Default for Game {
@@ -94,6 +98,7 @@ impl Default for Game {
             render_distance: 8,
             simulation_distance: 5,
             max_fps: 60,
+            gui_scale: 2,
         }
     }
 }
@@ -224,6 +229,13 @@ impl Config {
                 "a [[servers]] entry needs a name and an address",
             ));
         }
+        // A scale the game's own slider doesn't offer is refused, not guessed at.
+        if config.game.gui_scale > 4 {
+            return Err(<toml::de::Error as serde::de::Error>::custom(format!(
+                "gui_scale is {} in [game]: use 0 (the game chooses) or 1 to 4",
+                config.game.gui_scale
+            )));
+        }
         Ok(config)
     }
 }
@@ -260,6 +272,7 @@ address = "mc-club.example.edu"  # a port after a colon only when it is not 2556
 render_distance = 8
 simulation_distance = 5
 max_fps = 60
+gui_scale = 2                    # the interface's size: 0 lets the game choose, else 1 to 4
 
 [lan]
 open = true                      # a world may be opened to the LAN (vanilla's Open to LAN)
@@ -293,7 +306,8 @@ active = "26.3-20261122"         # the build the club plays; else the only build
             Game {
                 render_distance: 8,
                 simulation_distance: 5,
-                max_fps: 60
+                max_fps: 60,
+                gui_scale: 2
             }
         );
         assert!(empty.lan.open);
@@ -330,6 +344,7 @@ active = "26.3-20261122"         # the build the club plays; else the only build
         assert_eq!(config.game.render_distance, 8);
         assert_eq!(config.game.simulation_distance, 5);
         assert_eq!(config.game.max_fps, 60);
+        assert_eq!(config.game.gui_scale, 2);
         assert!(config.lan.open);
         assert!(config.hosting.enabled);
         assert_eq!(
@@ -356,6 +371,15 @@ active = "26.3-20261122"         # the build the club plays; else the only build
         assert!(wrong("[game]\nrender_distance = \"eight\"\n"));
         assert!(wrong("[game]\nrender_distance = -8\n"));
         assert!(wrong("[hosting]\nfirst_port = 70000\n"));
+        // A scale outside the game's own slider (0 is its choice).
+        assert!(wrong("[game]\ngui_scale = 5\n"));
+        assert_eq!(
+            Config::parse("[game]\ngui_scale = 0\n")
+                .unwrap()
+                .game
+                .gui_scale,
+            0
+        );
         assert!(wrong("[club]\nshared_accounts = \"eleve\"\n"));
         // A server with no name or no address is none to show or to join.
         assert!(wrong("[[servers]]\nname = \"Club\"\naddress = \"  \"\n"));

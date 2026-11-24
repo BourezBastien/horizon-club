@@ -69,6 +69,9 @@ impl Launcher {
             .child(main);
         if let Some(dir) = &open {
             column = column.child(self.glass_server_tabs(dir, &status, cx));
+            if self.servers.log_shown {
+                column = column.child(self.failure_log(dir, cx).mt(px(10.)));
+            }
         }
         let mut page = div().flex().flex_col().child(head).child(
             div()
@@ -126,9 +129,14 @@ impl Launcher {
                 .find(|(id, _)| *id == mode)
                 .map_or(mode.clone(), |(_, label)| tr(label).to_string());
             let max = self.servers.shown("server", "max_players");
+            let backups = self.servers.backups.len();
             [
                 mode,
-                self.servers.shown("world", "name"),
+                if backups == 1 {
+                    tr("One backup").to_string()
+                } else {
+                    trf("{count} backups", &[("count", &backups.to_string())])
+                },
                 if max.is_empty() {
                     max
                 } else {
@@ -141,20 +149,6 @@ impl Launcher {
             .join(" · ")
         };
 
-        // The folder (not in the mockup): a small icon button in the glass's top right corner,
-        // which the mockup leaves empty, so the head keeps its layout.
-        let mut corner = div()
-            .absolute()
-            .top(px(16.))
-            .right(px(16.))
-            .flex()
-            .gap(px(4.));
-        let folder = dir.to_path_buf();
-        corner = corner.child(
-            ui::icon_button("server-folder", "folder-01", 32., 17., 10., false, &t)
-                .tooltip(ui::tip(tr("Open the server's folder")))
-                .on_click(move |_, _, cx| crate::glass_toast::open(cx, &folder)),
-        );
         // Start, or Restart and Stop.
         let mut buttons = div().flex().flex_none().items_center().gap(px(8.));
         let wait = |b: Stateful<Div>| b.opacity(0.4).cursor_default();
@@ -261,8 +255,7 @@ impl Launcher {
                             ),
                     )
                     .child(buttons),
-            )
-            .child(corner);
+            );
         // What the launcher says besides (not in the mockup): a crash count, the action under way,
         // a problem, a note, settings that wait for a restart.
         if status.crashes > 0 {

@@ -17,8 +17,10 @@ pub const EXTRAS: &str = "horizon-extras.txt";
 
 /// The game's `options.txt` as a student starts with it: `[game]`'s values, the game's language
 /// (`lang`), vanilla's two first-start screens skipped (`onboardAccessibility`,
-/// `skipMultiplayerWarning`), and what the "Performance" preset sets among vanilla's options
-/// (`graphics_preset.rs`), the render and simulation distances aside, which are the club's.
+/// `skipMultiplayerWarning`), the music off (the club plays in a room together: every other sound
+/// stays, steps and animals as vanilla sets them), and what the "Performance" preset sets among
+/// vanilla's options (`graphics_preset.rs`), the render and simulation distances aside, which are
+/// the club's.
 pub fn options(game: &Game, language: Language) -> String {
     let lang = match language {
         Language::French => "fr_fr",
@@ -37,9 +39,10 @@ pub fn options(game: &Game, language: Language) -> String {
          biomeBlendRadius:0\n\
          mipmapLevels:0\n\
          entityDistanceScaling:0.5\n\
-         guiScale:0\n\
+         guiScale:{}\n\
+         soundCategory_music:0.0\n\
          fullscreen:false\n",
-        game.render_distance, game.simulation_distance, game.max_fps
+        game.render_distance, game.simulation_distance, game.max_fps, game.gui_scale
     )
 }
 
@@ -135,15 +138,17 @@ mod tests {
              biomeBlendRadius:0\n\
              mipmapLevels:0\n\
              entityDistanceScaling:0.5\n\
-             guiScale:0\n\
+             guiScale:2\n\
+             soundCategory_music:0.0\n\
              fullscreen:false\n"
         );
-        // The supervisor's values, and English for a club that isn't French: only those four
-        // lines differ.
+        // The supervisor's values, and English for a club that isn't French: only those five
+        // lines differ. 0 lets the game choose the interface's size.
         let club = Game {
             render_distance: 6,
             simulation_distance: 7,
             max_fps: 30,
+            gui_scale: 0,
         };
         let theirs = options(&club, Language::English);
         assert_eq!(
@@ -155,7 +160,23 @@ mod tests {
                 ("lang", "en_us")
             ]
         );
-        assert_eq!(lines(&theirs)[4..], lines(&defaults)[4..]);
+        assert_eq!(lines(&theirs)[4..12], lines(&defaults)[4..12]);
+        assert_eq!(
+            lines(&theirs)[12..],
+            [
+                ("guiScale", "0"),
+                ("soundCategory_music", "0.0"),
+                ("fullscreen", "false")
+            ]
+        );
+        // Only the music is off: no other sound is touched, so each keeps the game's own volume.
+        assert_eq!(
+            lines(&defaults)
+                .iter()
+                .filter(|(k, _)| k.starts_with("soundCategory_"))
+                .count(),
+            1
+        );
     }
 
     /// The graphics file is the Performance preset: every line is `key:value`, each key once,

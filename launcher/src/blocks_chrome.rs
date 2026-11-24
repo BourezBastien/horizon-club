@@ -127,7 +127,7 @@ impl Launcher {
         let hosting = self.config.hosting.enabled;
         let mut list = list;
         if hosting {
-            list = list.child(heading(tr("SERVERS").into()));
+            list = list.child(heading(tr("MY SERVERS").into()));
         }
         for e in servers {
             let up = self.servers.is_up(&e.dir);
@@ -182,6 +182,47 @@ impl Launcher {
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                         this.open_create(cx);
                         this.go(Page::Servers);
+                        cx.notify();
+                    })),
+            );
+        }
+        // The servers this student was invited to, a second group under their own: a friend's
+        // server, one they joined. They are joined from the Multiplayer tab, where a click leads;
+        // a server that is off is dimmed, and nothing is created here.
+        let invited: Vec<_> = self.servers.invited().to_vec();
+        if !invited.is_empty() {
+            list = list.child(heading(tr("INVITED SERVERS").into()));
+        }
+        for (i, (server, up)) in invited.into_iter().enumerate() {
+            list = list.child(
+                shell::row(SharedString::from(format!("side-invited-{i}")), false, &t)
+                    .opacity(if up { 1. } else { 0.6 })
+                    .child(
+                        div()
+                            .relative()
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .justify_center()
+                            .size(px(36.))
+                            .bg(plate::alpha(n.card_hi, n.card_hi_alpha))
+                            .child(blocks::icon("server", 18., shell::c(n.ink_soft))),
+                    )
+                    .child(shell::row_text(
+                        server.name.clone(),
+                        trf(
+                            "{owner} · {state}",
+                            &[
+                                ("owner", &server.owner),
+                                ("state", tr(if up { "Online" } else { "Offline" })),
+                            ],
+                        ),
+                        Some(shell::c(if up { n.success } else { n.muted })),
+                        &t,
+                    ))
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.home_tab = home_tabs::HomeTab::Multiplayer;
+                        this.go(Page::Play);
                         cx.notify();
                     })),
             );

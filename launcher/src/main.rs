@@ -341,6 +341,8 @@ fn menus() -> Vec<Menu> {
 mod startup;
 
 fn main() {
+    // First of all: a panic afterwards leaves a report in the launcher's data folder.
+    horizon_launcher::panic_report::install();
     startup::run();
 }
 

@@ -1,5 +1,5 @@
 use super::*;
-use crate::{config::Config, online};
+use crate::{config::Config, invited, online};
 use std::path::PathBuf;
 
 fn scratch(name: &str) -> PathBuf {
@@ -90,18 +90,27 @@ address = "10.0.0.2"
         online::parse(r#"{"name": "Monde de Alice", "owner": "Alice", "host": "192.168.10.7", "port": 25570, "at": 1763800000}"#)
             .unwrap(),
     ];
+    let remembered = [
+        invited::Invited::of(&announced[0]),
+        invited::Invited::of(&online::parse(
+            r#"{"name": "Monde de Bob", "owner": "Bob", "host": "10.0.0.9", "port": 25571, "at": 1763800000}"#,
+        )
+        .unwrap()),
+    ];
     assert_eq!(
-        name_and_address(&club_servers(&config, &announced)),
+        name_and_address(&club_servers(&config, &announced, &remembered)),
         [
             ("Serveur du club", "mc-club.example.edu:25565"),
             ("Second", "10.0.0.2"),
             ("Monde de Jdupont", "192.168.10.42:25565"),
             ("Monde de Alice", "192.168.10.7:25570"),
+            ("Monde de Bob", "10.0.0.9:25571"),
         ],
-        "the club's, in its file's order, then the announced ones as they were given"
+        "the club's, in its file's order, then the announced ones as they were given, then the \
+         remembered ones that aren't announced (Jdupont's is: once)"
     );
     // A bare club offers nothing: an empty list, not an error.
-    assert!(club_servers(&Config::default(), &[]).is_empty());
+    assert!(club_servers(&Config::default(), &[], &[]).is_empty());
 }
 
 #[test]

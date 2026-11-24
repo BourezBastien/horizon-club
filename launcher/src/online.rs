@@ -1,8 +1,10 @@
 //! The hosted servers announced in `<root>\online\` (docs/school-edition/launcher-target.md,
-//! section 6). The launcher that hosts a server writes `online\<COMPUTERNAME>.json` again every
-//! ten seconds while it runs and deletes it when it stops; every launcher lists the
-//! announcements under [`FRESH`] old, so a host that died takes its server off the list by
-//! itself.
+//! section 6), and who has the launcher open (`online\people\`). The launcher that hosts a
+//! server writes `online\<COMPUTERNAME>.json` again every ten seconds while it runs and deletes
+//! it when it stops; every launcher lists the announcements under [`FRESH`] old, so a host that
+//! died takes its server off the list by itself. While a launcher is open it says as much the
+//! same way: the cards a student picks friends from are the people whose launchers are open, not
+//! the college's two hundred computers.
 
 use serde::{Deserialize, Serialize};
 use std::io::Write;
@@ -97,26 +99,113 @@ pub fn file(dir: &Path) -> PathBuf {
 /// another launcher never reads half of one. The folder is the supervisor's to make: a student
 /// who cannot write there is not hosting for the club, which the caller says once.
 pub fn write(dir: &Path, announcement: &Announcement) -> Result<(), String> {
-    let path = file(dir);
+    write_whole(&file(dir), &announcement.text())
+}
+
+/// [`write`], for any JSON file given: a temporary file beside, flushed, then renamed into place.
+pub(crate) fn write_whole(path: &Path, text: &str) -> Result<(), String> {
     let partial = path.with_extension("json.tmp");
     let mut file =
         std::fs::File::create(&partial).map_err(|e| format!("{}: {e}", partial.display()))?;
-    let text = announcement.text();
     file.write_all(text.as_bytes())
         .and_then(|()| file.sync_all())
         .map_err(|e| format!("{}: {e}", partial.display()))?;
     drop(file);
-    std::fs::rename(&partial, &path).map_err(|e| format!("{}: {e}", path.display()))
+    std::fs::rename(&partial, path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 /// Takes this computer's announcement away: nothing left to join once its server has stopped.
 /// A file that is already gone is gone.
 pub fn remove(dir: &Path) -> Result<(), String> {
-    match std::fs::remove_file(file(dir)) {
+    remove_at(&file(dir))
+}
+
+/// [`remove`], for a file given.
+fn remove_at(path: &Path) -> Result<(), String> {
+    match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(format!("{}", e)),
     }
+}
+
+// ----- Who has the launcher open -----------------------------------------------------------------
+
+/// The folder in `online\` where each launcher says who is at its computer.
+pub const PEOPLE: &str = "people";
+
+/// Someone with the launcher open, as their launcher says so.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct Person {
+    /// Their player name.
+    pub name: String,
+    /// When their launcher wrote it: seconds since the Unix epoch, by its own clock.
+    pub at: u64,
+}
+
+impl Person {
+    /// The line its file holds, as [`Announcement::text`] writes its own.
+    pub fn text(&self) -> String {
+        let name = serde_json::Value::String(self.name.clone()).to_string();
+        format!("{{\"name\": {name}, \"at\": {}}}", self.at)
+    }
+
+    /// [`Announcement::is_fresh`].
+    pub fn is_fresh(&self, now: u64) -> bool {
+        now.saturating_sub(self.at) < FRESH.as_secs()
+    }
+}
+
+/// Where the launchers say who is at their computer: `online\people\`.
+pub fn people_dir(dir: &Path) -> PathBuf {
+    dir.join(PEOPLE)
+}
+
+/// The file that says `name` has the launcher open: named for them, as a name is letters, digits
+/// and underscores. None for a name that is not one: a file of it could not be read back.
+pub fn person_file(dir: &Path, name: &str) -> Option<PathBuf> {
+    crate::friends::valid_name(name).then(|| people_dir(dir).join(format!("{name}.json")))
+}
+
+/// Says that `person` has the launcher open, again every ten seconds while it runs. The folder
+/// is made if the supervisor's layout doesn't hold it yet.
+pub fn write_person(dir: &Path, person: &Person) -> Result<(), String> {
+    let path = person_file(dir, &person.name).ok_or("not a player's name")?;
+    std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
+    write_whole(&path, &person.text())
+}
+
+/// Takes away that `name` has the launcher open. A file that is already gone is gone.
+pub fn remove_person(dir: &Path, name: &str) -> Result<(), String> {
+    match person_file(dir, name) {
+        Some(path) => remove_at(&path),
+        None => Ok(()),
+    }
+}
+
+/// The person in a file's text. None for a broken one: not JSON, a field missing or of another
+/// kind, or a name Minecraft would not take. The folder is every student's to write, and a name
+/// read here is written into commands: one that is not a name is not read.
+pub fn parse_person(text: &str) -> Option<Person> {
+    let person: Person = serde_json::from_str(text).ok()?;
+    crate::friends::valid_name(&person.name).then_some(person)
+}
+
+/// Who else has the launcher open: the people in `dir`'s `people` folder under [`FRESH`] old at
+/// `now`, by name, without `mine` (this launcher's own player, whose file it wrote). A file
+/// that is broken or cannot be read is skipped, as one that is old.
+pub fn people(dir: &Path, now: u64, mine: &str) -> Vec<Person> {
+    let mut found: Vec<Person> = std::fs::read_dir(people_dir(dir))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| entry.path().extension().is_some_and(|e| e == "json"))
+        .filter_map(|entry| parse_person(&std::fs::read_to_string(entry.path()).ok()?))
+        .filter(|person| person.name != mine && person.is_fresh(now))
+        .collect();
+    found.sort_by(|a, b| a.name.cmp(&b.name));
+    found.dedup_by(|a, b| a.name == b.name);
+    found
 }
 
 /// The announcement in a file's text. None for a broken one: not JSON, a field missing or of
@@ -393,6 +482,67 @@ mod tests {
         remove(&dir).unwrap();
         // A student who cannot write there (or a folder that is not there) is an error.
         assert!(write(&dir.join("none"), &announcement).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A launcher says who is at its computer in a file of its own, named for the player; the
+    /// others list who else said so lately.
+    #[test]
+    fn who_has_the_launcher_open_is_written_in_a_file_of_their_own_and_listed() {
+        let dir = std::env::temp_dir().join(format!("horizon-club-people-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // Nothing is there yet: nobody, and no error.
+        assert!(people(&dir, AT, "Jdupont").is_empty());
+        let person = |name: &str, at: u64| Person {
+            name: name.into(),
+            at,
+        };
+        // The folder is not laid out yet: writing makes it.
+        write_person(&dir, &person("Jdupont", AT)).unwrap();
+        write_person(&dir, &person("Alice", AT - 20)).unwrap();
+        let folder = people_dir(&dir);
+        assert_eq!(
+            std::fs::read_to_string(folder.join("Jdupont.json")).unwrap(),
+            r#"{"name": "Jdupont", "at": 1763800000}"#
+        );
+        assert_eq!(
+            parse_person(&person("Alice", AT).text()),
+            Some(person("Alice", AT))
+        );
+        std::fs::write(folder.join("Bob.json"), person("Bob", AT - 40).text()).unwrap();
+        std::fs::write(folder.join("Eve.json"), person("Eve", AT - 200).text()).unwrap();
+        std::fs::write(folder.join("Zed.json"), "{ not json").unwrap();
+        // The folder is every student's to write: a name that is not one is not read, whatever
+        // file holds it.
+        std::fs::write(
+            folder.join("Bad.json"),
+            r#"{"name": "a b", "at": 1763800000}"#,
+        )
+        .unwrap();
+        std::fs::write(folder.join("Bad2.json"), person("../x; del *.*", AT).text()).unwrap();
+        // At AT: Alice and Bob, by name; the player's own line, the old and the broken are out.
+        assert_eq!(
+            people(&dir, AT, "Jdupont"),
+            [person("Alice", AT - 20), person("Bob", AT - 40)]
+        );
+        // Another student's launcher sees the first one too, and not its own line.
+        let others: Vec<String> = people(&dir, AT, "Alice")
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
+        assert_eq!(others, ["Bob", "Jdupont"]);
+        // Ten seconds later Bob is 50 seconds old: his launcher stopped saying so.
+        assert_eq!(people(&dir, AT + 10, "Jdupont"), [person("Alice", AT - 20)]);
+        // A launcher that closes takes its line away; gone again is fine.
+        remove_person(&dir, "Alice").unwrap();
+        remove_person(&dir, "Alice").unwrap();
+        assert!(
+            people(&dir, AT + 10, "Jdupont").is_empty(),
+            "Bob is 50 seconds old by then"
+        );
+        // A name that is not one has no file to write or to take away.
+        assert!(write_person(&dir, &person("a b", AT)).is_err());
+        remove_person(&dir, "a b").unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

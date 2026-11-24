@@ -130,11 +130,6 @@ const MODE_NOTES: [&str; 3] = [
     "Play a map the way it was made",
 ];
 
-/// A player name Minecraft accepts: 3 to 16 letters, digits or underscores.
-fn valid_name(name: &str) -> bool {
-    (3..=16).contains(&name.len()) && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-}
-
 /// A click that changes the draft with `f`.
 fn set(
     cx: &mut Context<Launcher>,
@@ -320,7 +315,6 @@ impl Launcher {
         let (new_world, copy, worlds) = (c.new_world, c.copy.clone(), c.worlds.clone());
         let details = c.details.clone();
         let (mode, difficulty, max) = (c.mode, c.difficulty, c.max_players);
-        let friends = c.friends.clone();
         let creating = self.servers.creating;
         // The mockup's `clamp(1.6rem, 2.4vw, 2.1rem)`.
         let size = (self.window_width * 0.024).clamp(25.6, 33.6);
@@ -594,15 +588,12 @@ impl Launcher {
                 .min_w_0(),
             );
 
-        // Who may join: the friends named below (the first an operator). A hosted server is
-        // friends-only; the Settings tab can open it to the club's network later.
+        // Who may join: the cards below, a friend each. A hosted server is friends-only; the
+        // Settings tab can open it to the club's network later.
         let who = div().flex().flex_col().child(
-            self.create_friends(&friends, cx).child(
-                ui::card_note(tr(
-                    "The first one becomes an operator. Add more later on the Players tab.",
-                ))
-                .mt(px(10.)),
-            ),
+            ui::card_note(tr(
+                "The server is yours: you are its operator. Your friends are let in from the start, on every server you create.",
+            )),
         );
 
         let body = div()
@@ -625,7 +616,15 @@ impl Launcher {
             .child(world)
             .child(section(tr("Game mode").into(), None, modes))
             .child(numbers)
-            .child(section(tr("Who can join").into(), None, who));
+            .child(section(
+                tr("Who can join").into(),
+                None,
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(who)
+                    .child(self.glass_create_cards(cx)),
+            ));
         div()
             .flex()
             .flex_col()
@@ -636,11 +635,17 @@ impl Launcher {
             .child(self.create_foot(cx))
     }
 
-    /// The friends let in, as chips with their face (the first is an operator), then a field to add one.
-    fn create_friends(&mut self, friends: &[String], cx: &mut Context<Self>) -> Div {
+    /// The Create dialog's cards: one for each friend and for each student whose launcher is open
+    /// now. A click makes a friend, or takes one away: the card is then the accent's, and a friend
+    /// is let in on the server from the start.
+    fn glass_create_cards(&mut self, cx: &mut Context<Self>) -> Div {
         let t = self.theme;
-        let mut chips = div().mt(px(12.)).flex().flex_wrap().gap(px(8.));
-        for (i, name) in friends.iter().enumerate() {
+        let accent = self.look.accent;
+        let soft = self.look.accent_soft;
+        let cards = self.servers.cards(&[]);
+        let mut grid = div().mt(px(12.)).flex().flex_wrap().gap(px(12.));
+        for (i, card) in cards.into_iter().enumerate() {
+            let name = card.name.clone();
             let face = div()
                 .flex()
                 .flex_none()
@@ -650,106 +655,41 @@ impl Launcher {
                 .rounded(px(8.))
                 .bg(white(fill::BUTTON))
                 .child(ui::icon("user", 16., white(ink::BODY)));
-            let mut chip = div()
-                .flex()
+            let note = match (card.friend, card.online) {
+                (true, true) => tr("Friend · launcher open"),
+                (true, false) => tr("Friend"),
+                (false, _) => tr("Launcher open"),
+            };
+            grid = grid.child(
+                choice(
+                    SharedString::from(format!("create-card-{i}")),
+                    card.friend,
+                    accent,
+                    &t,
+                )
                 .items_center()
-                .h(px(44.))
-                .rounded(px(radius::ROW))
-                .bg(white(fill::ROW_HOVER))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(10.))
-                        .pl(px(6.))
-                        .pr(px(12.))
-                        .child(face)
-                        .child(ui::text(14., FontWeight::MEDIUM, ink::FULL).child(name.clone()))
-                        .when(i == 0, |d| {
-                            d.child(
-                                ui::text(12., FontWeight::NORMAL, ink::FULL)
-                                    .text_color(ui::color(self.look.accent_soft))
-                                    .child(tr("Operator")),
-                            )
-                        }),
-                );
-            if i > 0 {
-                let gone = name.clone();
-                chip = chip.child(
-                    ui::icon_button(
-                        SharedString::from(format!("create-friend-remove-{i}")),
-                        "cancel-01",
-                        28.,
-                        14.,
-                        8.,
-                        false,
-                        &t,
-                    )
-                    .mr(px(6.))
-                    .on_click(cx.listener(
-                        move |this, _: &ClickEvent, _, cx| {
-                            if let Some(c) = &mut this.servers.create {
-                                c.friends.retain(|f| f != &gone);
-                            }
-                            cx.notify();
-                        },
-                    )),
-                );
-            }
-            chips = chips.child(chip);
+                .gap(px(12.))
+                .h(px(56.))
+                .px(px(14.))
+                .flex_1()
+                .min_w(px(200.))
+                .flex_basis(px(0.))
+                .child(face)
+                .child(choice_text(name.clone(), note))
+                .child(tick(card.friend, soft))
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.toggle_friend(&name, None);
+                    cx.notify();
+                })),
+            );
         }
-        let typed = self.servers.value(Field::Players).trim().to_string();
-        let ok = valid_name(&typed) && !friends.contains(&typed);
-        let focused = self.servers.focused == Some(Field::Players);
-        let add = keyboard(
-            div()
-                .id("create-friend-add")
-                .flex()
-                .items_center()
-                .h(px(32.))
-                .px(px(12.))
-                .rounded(px(9.))
-                .bg(white(fill::BUTTON))
-                .cursor_pointer()
-                .hover(|s| s.bg(white(fill::BUTTON_HOVER)))
-                .font_family(horizon_theme::glass::FONT)
-                .text_size(px(13.))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(white(ink::FULL))
-                .child(tr("Add")),
-            &t,
-        );
-        let add = if ok {
-            add.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                this.add_create_friend();
-                cx.notify();
-            }))
-        } else {
-            add.opacity(0.4).cursor_default()
-        };
-        chips.child(
-            div()
-                .flex()
-                .items_center()
-                .h(px(44.))
-                .pr(px(6.))
-                .rounded(px(radius::ROW))
-                .bg(white(if focused { fill::BUTTON } else { 0.04 }))
-                .child(self.field(Field::Players, "Add a friend's name", 170., cx))
-                .child(add),
-        )
-    }
-
-    /// The name typed in the friend field joins the list, if Minecraft would take it.
-    pub(super) fn add_create_friend(&mut self) {
-        let typed = self.servers.value(Field::Players).trim().to_string();
-        let Some(c) = &mut self.servers.create else {
-            return;
-        };
-        if valid_name(&typed) && !c.friends.contains(&typed) {
-            c.friends.push(typed);
-            self.servers.text(Field::Players).set(String::new());
+        if self.servers.people.is_empty() && self.servers.friends.is_empty() {
+            return grid.child(ui::card_note(tr(
+                "Nobody else has Horizon Club open right now. Their cards appear here as they \
+                 open it.",
+            )));
         }
+        grid
     }
 
     /// The foot: what is happening, Cancel and Create server. The EULA needs no tick: the club's
@@ -871,21 +811,6 @@ fn create_foot_row(status: Option<Div>, buttons: impl IntoElement) -> Div {
                 .gap(px(16.))
                 .child(div().flex_none().child(buttons)),
         )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::valid_name;
-
-    #[test]
-    fn friend_names_follow_minecrafts_rules() {
-        assert!(valid_name("Player46008"));
-        assert!(valid_name("oak_leaf"));
-        assert!(!valid_name("ab"));
-        assert!(!valid_name("seventeen_letters"));
-        assert!(!valid_name("no spaces"));
-        assert!(!valid_name("dash-name"));
-    }
 }
 
 /// #16086: the foot's message used to get whatever width the row's shrink left, down to a

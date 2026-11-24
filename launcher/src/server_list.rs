@@ -39,13 +39,29 @@ impl Server {
 }
 
 /// The servers the game's list holds: those of `club.toml`, in its order, then the hosted servers
-/// `announced` in the club's `online\` folder ([`crate::online::list`]).
-pub fn club_servers(config: &Config, announced: &[Announcement]) -> Vec<Server> {
+/// `announced` in the club's `online\` folder ([`crate::online::list`]), then those `remembered`
+/// that aren't announced now ([`crate::invited`]): a friend's server that is off is still listed,
+/// to be joined from the game when it comes back.
+pub fn club_servers(
+    config: &Config,
+    announced: &[Announcement],
+    remembered: &[crate::invited::Invited],
+) -> Vec<Server> {
     config
         .servers
         .iter()
         .map(|server| Server::new(&server.name, &server.address))
         .chain(announced.iter().map(|a| Server::new(&a.name, a.address())))
+        .chain(
+            remembered
+                .iter()
+                .filter(|i| {
+                    !announced
+                        .iter()
+                        .any(|a| crate::invited::Invited::of(a).same(i))
+                })
+                .map(|i| Server::new(&i.name, i.address())),
+        )
         .collect()
 }
 
@@ -113,8 +129,9 @@ pub fn write_club_list(
     home: &Path,
     config: &Config,
     announced: &[Announcement],
+    remembered: &[crate::invited::Invited],
 ) -> Result<Vec<Server>, String> {
-    replace(home, &club_servers(config, announced))
+    replace(home, &club_servers(config, announced, remembered))
 }
 
 /// Now, in seconds since the Unix epoch: what an announcement's age is read against.

@@ -282,20 +282,22 @@ impl Launcher {
         // group from the first day, with the way to a first server under an empty list.
         let hosting = self.config.hosting.enabled;
         let servers = if hosting { servers } else { Vec::new() };
+        // A group's name in the rail: 12 px medium, white at 40 %.
+        let group = |label: SharedString| {
+            div()
+                .h(px(22.))
+                .flex()
+                .items_end()
+                .px(px(8.))
+                .pb(px(4.))
+                .child(
+                    fade(ui::text(12., FontWeight::MEDIUM, ink::DIM))
+                        .whitespace_nowrap()
+                        .child(label),
+                )
+        };
         if hosting {
-            list = list.child(
-                div()
-                    .h(px(22.))
-                    .flex()
-                    .items_end()
-                    .px(px(8.))
-                    .pb(px(4.))
-                    .child(
-                        fade(ui::text(12., FontWeight::MEDIUM, ink::DIM))
-                            .whitespace_nowrap()
-                            .child(tr("Servers")),
-                    ),
-            );
+            list = list.child(group(tr("My servers").into()));
         }
         let mut server_rows = div().flex().flex_col().gap(px(2.));
         for e in &servers {
@@ -361,10 +363,63 @@ impl Launcher {
                     })),
             );
         }
-        let list = list.child(server_rows);
+        // The servers this student was invited to, a second group under their own: a friend's
+        // server, one they joined. They are joined from the Multiplayer tab, where a click leads;
+        // a server that is off is dimmed, and nothing is created here.
+        let invited: Vec<_> = self.servers.invited().to_vec();
+        if !invited.is_empty() {
+            list = list.child(group(tr("Invited servers").into()));
+        }
+        let mut invited_rows = div().flex().flex_col().gap(px(2.));
+        for (i, (server, up)) in invited.into_iter().enumerate() {
+            let state = if up {
+                (Tone::Live, tr("Online"))
+            } else {
+                (Tone::Off, tr("Offline"))
+            };
+            let name = server.name.clone();
+            invited_rows = invited_rows.child(
+                ui::row(
+                    SharedString::from(format!("side-invited-{i}")),
+                    false,
+                    8.,
+                    &t,
+                )
+                .opacity(if up { 1. } else { 0.6 })
+                .child(
+                    div()
+                        .relative()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .justify_center()
+                        .size(px(38.))
+                        .rounded(px(radius::CONTROL))
+                        .bg(white(fill::BUTTON))
+                        .child(ui::icon("computer-terminal-01", 18., white(ink::STRONG))),
+                )
+                .child(fade(ui::row_text(
+                    name.clone(),
+                    (
+                        state.0,
+                        trf(
+                            "{owner} · {state}",
+                            &[("owner", &server.owner), ("state", state.1)],
+                        ),
+                    ),
+                )))
+                .when(!open, move |d| d.tooltip(ui::tip(name.clone())))
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.home_tab = home_tabs::HomeTab::Multiplayer;
+                    this.go(Page::Play);
+                    cx.notify();
+                })),
+            );
+        }
+        let list = list.child(server_rows).child(invited_rows);
         // More rows than the rail shows: while rows sit below the list's foot a fade and a
         // "More" pill say so; the pill scrolls to them.
-        let rows = servers.len() + usize::from(hosting);
+        let rows = servers.len() + usize::from(hosting) + self.servers.invited().len() + 1;
         let overflows = 52. * (1 + rows) as f32 > f32::from(window.viewport_size().height) - 420.;
         let scroll = self.rail.list.clone();
         // Before the list's first layout the handle knows no height: the estimate stands in.

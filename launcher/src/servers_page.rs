@@ -11,7 +11,7 @@ use horizon_launcher::heads;
 use horizon_launcher::servers::{
     self, Applied, Backup, Entry, Fix, NewServer, Problem, Status, World,
 };
-use horizon_launcher::{club, online, server_list};
+use horizon_launcher::{club, friends, invited, online, server_list};
 use horizon_theme::glass::radius;
 use serde_json::Value;
 use std::collections::{BTreeSet, HashMap};
@@ -30,16 +30,21 @@ use servers_format::{backup_label, bytes, uptime};
 /// lives as long as its launcher window (`stop_on_quit`).
 static STARTED_HERE: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
+/// The player of this launcher, for `stop_on_quit`: who it said has the launcher open.
+static ME: Mutex<Option<String>> = Mutex::new(None);
+
 /// Whether the `online\` folder's refusal has been said in the launcher's own log: once is
-/// enough, the folder is the supervisor's, not the student's, to fix.
+/// enough, the folder is the supervisor's, not the student's, to fix. One word for its
+/// announcement, one for who is here.
 static ANNOUNCE_QUIET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static PEOPLE_QUIET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// How often the open server's status and log are read, and the list's.
 const POLL_OPEN: Duration = Duration::from_millis(1000);
 const POLL_LIST: Duration = Duration::from_secs(3);
 
 /// How often the announcement of a running hosted server is written again: three times over
-/// before [`online::FRESH`] passes.
+/// before [`online::FRESH`] passes. Who has the launcher open is said as often.
 const ANNOUNCE: Duration = Duration::from_secs(10);
 
 /// Lines of the server's log kept on the page.
@@ -49,9 +54,7 @@ const CONSOLE_KEEP: usize = 1000;
 pub(super) enum Field {
     Name,
     Seed,
-    Players,
     Command,
-    AddPlayer,
     Motd,
     /// Home's Console's search (`console_page.rs`).
     ConsoleSearch,
@@ -95,7 +98,8 @@ pub(super) enum Event {
         status: Box<Status>,
         logs: Option<(u64, Vec<String>)>,
     },
-    Statuses(Vec<(PathBuf, Status)>),
+    /// Each listed server's state, and how many backups its folder holds.
+    Statuses(Vec<(PathBuf, Status, usize)>),
     Line(String),
     Done(Result<String, Problem>),
     Created(Result<Entry, Problem>),
@@ -110,6 +114,11 @@ pub(super) enum Event {
     },
     Applied(Result<Applied, Problem>),
     Pvp(Option<bool>),
+    /// Who else has the launcher open, and the hosted servers announced now.
+    Network {
+        people: Vec<online::Person>,
+        announced: Vec<online::Announcement>,
+    },
     Failed(String),
 }
 
@@ -124,18 +133,79 @@ pub(super) struct Create {
     mode: &'static str,
     difficulty: &'static str,
     max_players: u32,
-    /// The glass dialog's friends let in, the first an operator (the light one types them in
-    /// `Field::Players`).
-    friends: Vec<String>,
+}
+
+/// One card of who may join: a player, whether their launcher is open, and whether they are a
+/// friend of this student. The Create dialog and the Players tab draw the same cards.
+pub(super) struct Card {
+    name: String,
+    /// Their face, when the server knows them (its list has their UUID).
+    uuid: Option<String>,
+    online: bool,
+    friend: bool,
 }
 
 /// What the sidebar shows of the Servers page: its list once the page has read it, and whether
 /// a server answers.
 impl Servers {
-    /// A stopped server's line in the list: "Survival · stopped", as the mockup's. The open
-    /// server's mode is the one its settings show now, once read; the others' (and the open one's
-    /// until then) come from their files.
-    pub(super) fn stopped_line(&mut self, dir: &std::path::Path) -> String {
+    /// Who may join, as cards: the student's friends (their launcher open or not), then the
+    /// other students whose launcher is open now, then whoever else the server knows (`known`:
+    /// its list's names and UUIDs).
+    pub(super) fn cards(&self, known: &[(String, String)]) -> Vec<Card> {
+        let mut cards: Vec<Card> = Vec::new();
+        let mut add = |card: Card| {
+            if !cards.iter().any(|c| c.name == card.name) {
+                cards.push(card);
+            }
+        };
+        let face = |name: &str| {
+            known
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, u)| u.clone())
+        };
+        for name in &self.friends {
+            let online = self.people.iter().any(|p| &p.name == name);
+            add(Card {
+                name: name.clone(),
+                uuid: face(name),
+                online,
+                friend: true,
+            });
+        }
+        for person in &self.people {
+            add(Card {
+                name: person.name.clone(),
+                uuid: face(&person.name),
+                online: true,
+                friend: false,
+            });
+        }
+        for (name, uuid) in known {
+            add(Card {
+                name: name.clone(),
+                uuid: Some(uuid.clone()),
+                online: false,
+                friend: false,
+            });
+        }
+        cards
+    }
+    /// The servers this student was invited to, as the sidebar lists them: those announced now
+    /// first.
+    pub(super) fn invited(&self) -> &[(invited::Invited, bool)] {
+        &self.invited
+    }
+
+    /// The same, for the game's server list.
+    pub(super) fn remembered(&self) -> Vec<invited::Invited> {
+        self.invited.iter().map(|(i, _)| i.clone()).collect()
+    }
+
+    /// The server's game mode, in the launcher's language: the open server's is the one its
+    /// settings show now, once read; the others' (and the open one's until then) come from their
+    /// files.
+    fn mode_label(&mut self, dir: &std::path::Path) -> Option<String> {
         let open = Some(self.shown("world", "game_mode"))
             .filter(|m| !m.is_empty() && self.open.as_deref() == Some(dir));
         let mode = open.or_else(|| {
@@ -143,17 +213,47 @@ impl Servers {
                 .entry(dir.to_path_buf())
                 .or_insert_with(|| servers::game_mode(dir))
                 .clone()
-        });
-        match mode {
-            Some(mode) => {
-                let label = MODES
-                    .iter()
-                    .find(|(id, _)| *id == mode)
-                    .map_or(mode.clone(), |(_, label)| tr(label).to_string());
-                trf("{mode} · stopped", &[("mode", &label)])
-            }
+        })?;
+        Some(
+            MODES
+                .iter()
+                .find(|(id, _)| *id == mode)
+                .map_or(mode.clone(), |(_, label)| tr(label).to_string()),
+        )
+    }
+
+    /// A stopped server's line in the sidebar: "Survival · stopped", as the mockup's.
+    pub(super) fn stopped_line(&mut self, dir: &std::path::Path) -> String {
+        match self.mode_label(dir) {
+            Some(label) => trf("{mode} · stopped", &[("mode", &label)]),
             None => tr("Stopped").to_string(),
         }
+    }
+
+    /// What the list says of a stopped server, where its folder used to be named (a student has
+    /// no business in it): its mode, how many players it takes, and how many backups it holds.
+    pub(super) fn facts_line(&mut self, dir: &std::path::Path) -> String {
+        let mut parts: Vec<String> = self.mode_label(dir).into_iter().collect();
+        let open = self.open.as_deref() == Some(dir);
+        let max = if open {
+            self.shown("server", "max_players")
+        } else {
+            servers::file_setting(dir, "server", "max_players").unwrap_or_default()
+        };
+        if !max.is_empty() {
+            parts.push(trf("up to {max} players", &[("max", &max)]));
+        }
+        let backups = if open {
+            self.backups.len()
+        } else {
+            self.backups_count.get(dir).copied().unwrap_or(0)
+        };
+        parts.push(if backups == 1 {
+            tr("One backup").to_string()
+        } else {
+            trf("{count} backups", &[("count", &backups.to_string())])
+        });
+        parts.join(" · ")
     }
 
     pub(super) fn sidebar_list(&self) -> Option<&[Entry]> {
@@ -195,6 +295,8 @@ pub(super) struct Servers {
     restart_needed: BTreeSet<String>,
     backups: Vec<Backup>,
     confirm_restore: Option<String>,
+    /// Whether the game's own log is shown under the server, as a problem's button asks.
+    log_shown: bool,
     confirm_delete: bool,
     pvp: Option<bool>,
     texts: HashMap<Field, LineEdit>,
@@ -210,6 +312,18 @@ pub(super) struct Servers {
     faces: HashMap<String, Option<Vec<[u8; 4]>>>,
     /// When the running hosted server's announcement was last written, while one runs.
     announced: Option<Instant>,
+    /// The student's friends (`friends.json` on their computer).
+    friends: Vec<String>,
+    /// Who else has the launcher open, read again every [`ANNOUNCE`] seconds.
+    people: Vec<online::Person>,
+    people_at: Option<Instant>,
+    people_polling: bool,
+    /// The servers the student was invited to, each with whether it is announced now, and those
+    /// announced at the last reading.
+    invited: Vec<(invited::Invited, bool)>,
+    seen: Vec<online::Announcement>,
+    /// How many backups each listed server's folder holds, read with its status.
+    backups_count: HashMap<PathBuf, usize>,
     tx: Sender<Event>,
     rx: Receiver<Event>,
 }
@@ -218,6 +332,13 @@ impl Servers {
     pub(super) fn new() -> Self {
         let (tx, rx) = channel();
         Self {
+            friends: friends::load(),
+            people: Vec::new(),
+            people_at: None,
+            people_polling: false,
+            invited: invited::states(&invited::load(), &[]),
+            seen: Vec::new(),
+            backups_count: HashMap::new(),
             list: Vec::new(),
             loaded: false,
             open: None,
@@ -243,6 +364,7 @@ impl Servers {
             restart_needed: BTreeSet::new(),
             backups: Vec::new(),
             confirm_restore: None,
+            log_shown: false,
             confirm_delete: false,
             pvp: None,
             texts: HashMap::new(),
@@ -327,11 +449,12 @@ pub(super) fn stop_on_quit() {
     if let Err(e) = online::remove(&club::online_dir()) {
         eprintln!("Horizon launcher: could not remove the announcement: {e}");
     }
-}
-
-/// The player's own name, to let them in on a friends-only server: the Windows session's.
-fn own_name(player: &Option<String>) -> Option<String> {
-    player.clone()
+    // The launcher is closed: it no longer says who is at this computer.
+    if let Some(me) = ME.lock().unwrap().clone() {
+        if let Err(e) = online::remove_person(&club::online_dir(), &me) {
+            eprintln!("Horizon launcher: could not say the launcher closed: {e}");
+        }
+    }
 }
 
 impl Launcher {
@@ -429,6 +552,7 @@ impl Launcher {
         s.note = None;
         s.confirm_restore = None;
         s.confirm_delete = false;
+        s.log_shown = false;
         s.texts.remove(&Field::DeleteServer);
         s.restart_needed.clear();
         s.texts.remove(&Field::Motd);
@@ -445,6 +569,7 @@ impl Launcher {
             changed |= self.servers_event(event);
         }
         self.announce();
+        self.presence();
         if self.page != Page::Servers || self.servers.polling || !self.servers.loaded {
             return changed;
         }
@@ -504,7 +629,7 @@ impl Launcher {
                         .into_iter()
                         .map(|d| {
                             let s = servers::status(&d);
-                            (d, s)
+                            (d.clone(), s, servers::backup_count(&d))
                         })
                         .collect();
                     let _ = tx.send(Event::Statuses(all));
@@ -590,6 +715,53 @@ impl Launcher {
         }
     }
 
+    /// Says that this student's launcher is open (`online\people\`), again every [`ANNOUNCE`]
+    /// seconds, and reads who else's is and which hosted servers are announced. Read again at
+    /// once when the Create dialog opens or the Players tab shows, whose cards they are. A
+    /// student who cannot write there is missing from the others' cards, said once in the
+    /// launcher's own log and never in the window.
+    fn presence(&mut self) {
+        if self.servers.people_polling
+            || self
+                .servers
+                .people_at
+                .is_some_and(|at| at.elapsed() < ANNOUNCE)
+        {
+            return;
+        }
+        self.servers.people_at = Some(Instant::now());
+        self.servers.people_polling = true;
+        *ME.lock().unwrap() = self.player.clone();
+        let mine = self.player.clone();
+        let tx = self.servers.tx.clone();
+        std::thread::spawn(move || {
+            let dir = club::online_dir();
+            if let Some(name) = &mine {
+                let person = online::Person {
+                    name: name.clone(),
+                    at: server_list::now(),
+                };
+                if online::write_person(&dir, &person).is_err()
+                    && !PEOPLE_QUIET.swap(true, std::sync::atomic::Ordering::Relaxed)
+                {
+                    eprintln!(
+                        "{}",
+                        tr(
+                            "This launcher cannot write in the club's online folder, so other \
+                             students won't see it open, nor a hosted server in their list.",
+                        )
+                    );
+                }
+            }
+            let now = server_list::now();
+            let network = Event::Network {
+                people: online::people(&dir, now, mine.as_deref().unwrap_or_default()),
+                announced: online::list(&dir, now),
+            };
+            let _ = tx.send(network);
+        });
+    }
+
     fn servers_event(&mut self, event: Event) -> bool {
         let s = &mut self.servers;
         match event {
@@ -633,9 +805,13 @@ impl Launcher {
             Event::Statuses(all) => {
                 s.polling = false;
                 let mut changed = false;
-                for (dir, status) in all {
+                for (dir, status, backups) in all {
                     if s.statuses.get(&dir) != Some(&status) {
-                        s.statuses.insert(dir, status);
+                        s.statuses.insert(dir.clone(), status);
+                        changed = true;
+                    }
+                    if s.backups_count.get(&dir) != Some(&backups) {
+                        s.backups_count.insert(dir, backups);
                         changed = true;
                     }
                 }
@@ -682,12 +858,16 @@ impl Launcher {
                 config,
                 backups,
             } => {
+                let count_changed = s.backups_count.get(&dir) != Some(&backups.len());
+                if count_changed {
+                    s.backups_count.insert(dir.clone(), backups.len());
+                }
                 if s.open.as_ref() == Some(&dir) {
                     s.config = config;
                     s.backups = backups;
                     true
                 } else {
-                    false
+                    count_changed
                 }
             }
             Event::Deleted { dir, result } => {
@@ -728,11 +908,50 @@ impl Launcher {
                 s.pvp = on;
                 true
             }
+            Event::Network { people, announced } => {
+                s.people_polling = false;
+                let mut changed = s.people != people;
+                s.people = people;
+                let before = s.invited.clone();
+                changed |= self.remember_invited(&announced, None) != before;
+                changed
+            }
             Event::Failed(e) => {
                 s.problem = Some(Problem::plain(e));
                 true
             }
         }
+    }
+
+    /// The invited servers, once `joined` was joined (None when none was): a friend's server
+    /// announced now is an invitation, and so is a server the student joined. The sidebar's group
+    /// says of each whether it is announced now, and the Multiplayer tab lists a remembered one
+    /// that is off. What the sidebar lists afterwards.
+    fn remember_invited(
+        &mut self,
+        seen: &[online::Announcement],
+        joined: Option<&online::Announcement>,
+    ) -> Vec<(invited::Invited, bool)> {
+        let s = &mut self.servers;
+        s.seen = seen.to_vec();
+        let list: Vec<invited::Invited> = s.invited.iter().map(|(i, _)| i.clone()).collect();
+        let (list, saved) = invited::remember(&list, seen, &s.friends, joined, server_list::now());
+        s.invited = invited::states(&list, seen);
+        if saved {
+            if let Err(e) = invited::save(&list) {
+                eprintln!("Horizon launcher: could not save the invited servers: {e}");
+            }
+            self.multiplayer.stale();
+        }
+        s.invited.clone()
+    }
+
+    /// The hosted server at `address` is joined from the Multiplayer tab: it is remembered among
+    /// the invited servers, where the student finds it again after it stopped.
+    pub(super) fn remember_joined(&mut self, address: &str) {
+        let seen = self.servers.seen.clone();
+        let joined = seen.iter().find(|a| a.address() == address).cloned();
+        self.remember_invited(&seen, joined.as_ref());
     }
 
     /// The `pvp` game rule, asked of the running game (it's a rule of the world, not a setting).
@@ -882,7 +1101,7 @@ impl Launcher {
         });
     }
 
-    fn fix(&mut self, fix: Fix, cx: &mut Context<Self>) {
+    fn fix(&mut self, fix: Fix, _cx: &mut Context<Self>) {
         self.servers.problem = None;
         match fix {
             Fix::PortTaken => {
@@ -913,10 +1132,8 @@ impl Launcher {
                 }
             }
             Fix::ShowLog => {
-                self.servers.tab = Tab::Overview;
-                if let Some(dir) = &self.servers.open {
-                    crate::glass_toast::open(cx, &dir.join("logs"));
-                }
+                // In the window, where every student can read it: not in a folder to wander in.
+                self.servers.log_shown = true;
             }
         }
     }
@@ -936,23 +1153,15 @@ impl Launcher {
                 &[("number", &(self.servers.list.len() + 1).to_string())],
             )
         };
-        // The glass dialog starts with an empty name (its placeholder says the default) and the
-        // player as the first friend.
+        // The glass dialog starts with an empty name: its placeholder says the default.
         let glass = self.theme.glass;
-        let own = own_name(&self.player).unwrap_or_default();
         self.servers
             .text(Field::Name)
             .set(if glass { String::new() } else { name });
         self.servers.selected = (!glass).then_some(Field::Name);
         self.servers.text(Field::Seed).set(String::new());
-        self.servers
-            .text(Field::Players)
-            .set(if glass { String::new() } else { own.clone() });
-        let friends = if glass && !own.is_empty() {
-            vec![own]
-        } else {
-            Vec::new()
-        };
+        // The cards are who has the launcher open now: read again as the dialog opens.
+        self.servers.people_at = None;
         let details = if glass {
             horizon_launcher::worlds::list(&backend::game_home())
                 .into_iter()
@@ -973,7 +1182,6 @@ impl Launcher {
             mode: "survival",
             difficulty: "normal",
             max_players: 10,
-            friends,
             details,
         });
     }
@@ -991,10 +1199,15 @@ impl Launcher {
                 seed: self.servers.value(Field::Seed).to_string(),
             },
         };
-        let mut players = c.friends.clone();
-        for p in self.servers.value(Field::Players).split([',', ' ']) {
-            if !p.is_empty() && !players.iter().any(|q| q == p) {
-                players.push(p.to_string());
+        // The student, who is the server's operator, then their friends: a friend is let in on
+        // every server the student creates.
+        let mut players: Vec<String> = Vec::new();
+        if let Some(me) = &self.player {
+            players.push(me.clone());
+        }
+        for friend in &self.servers.friends {
+            if !players.contains(friend) {
+                players.push(friend.clone());
             }
         }
         let name = self.servers.value(Field::Name).trim().to_string();
@@ -1064,10 +1277,7 @@ impl Launcher {
             // The log search sits by buttons: the mockup's small `FIELD`, as tall as they are.
             crate::glass_ui::field(focused, invalid)
                 .when(
-                    matches!(
-                        f,
-                        Field::ConsoleSearch | Field::Motd | Field::AddPlayer | Field::DeleteServer
-                    ),
+                    matches!(f, Field::ConsoleSearch | Field::Motd | Field::DeleteServer),
                     |d| d.h(px(36.)).px(px(12.)).rounded(px(radius::CONTROL)),
                 )
                 // The Create dialog's name and seed are the large `FIELD_LG`: 48 px, 15 px text,
@@ -1085,10 +1295,6 @@ impl Launcher {
                         .text_size(px(13.))
                         .font_weight(FontWeight::MEDIUM)
                 })
-                // The friend field sits in its chip, on the chip's fill.
-                .when(matches!(f, Field::Players), |d| {
-                    d.h_full().px(px(14.)).bg(gpui::transparent_black())
-                })
                 // The server's command line: the field is the line's middle, on its fill, in mono.
                 .when(f == Field::Command, |d| {
                     d.h_full()
@@ -1100,24 +1306,17 @@ impl Launcher {
                 })
                 // The mockup's focus ring (`:focus-visible`, 2 px of the accent's soft shade) on a
                 // field of its own, drawn inside its edge: GPUI has no outline.
-                .when(
-                    focused && !invalid && !matches!(f, Field::Players | Field::Command),
-                    |d| {
-                        let small = matches!(
-                            f,
-                            Field::ConsoleSearch
-                                | Field::AccentHex
-                                | Field::Motd
-                                | Field::AddPlayer
-                                | Field::DeleteServer
-                        );
-                        d.child(crate::glass_ui::focus_ring(if small {
-                            radius::CONTROL
-                        } else {
-                            radius::ROW
-                        }))
-                    },
-                )
+                .when(focused && !invalid && f != Field::Command, |d| {
+                    let small = matches!(
+                        f,
+                        Field::ConsoleSearch | Field::AccentHex | Field::Motd | Field::DeleteServer
+                    );
+                    d.child(crate::glass_ui::focus_ring(if small {
+                        radius::CONTROL
+                    } else {
+                        radius::ROW
+                    }))
+                })
         } else {
             div()
                 .flex()
@@ -1205,9 +1404,7 @@ impl Launcher {
 
     fn field_enter(&mut self, f: Field) {
         match f {
-            // The glass dialog's friend field adds the name typed.
-            Field::Players if self.theme.glass => self.add_create_friend(),
-            Field::Name | Field::Seed | Field::Players => self.create_server(),
+            Field::Name | Field::Seed => self.create_server(),
             Field::Command => {
                 let line = self.servers.text(Field::Command).take();
                 let line = line.trim().trim_start_matches('/').to_string();
@@ -1215,7 +1412,6 @@ impl Launcher {
                     self.api_command(line);
                 }
             }
-            Field::AddPlayer => self.add_player(),
             Field::Motd => {
                 let motd = self.servers.value(Field::Motd).trim().to_string();
                 if motd.is_empty() {
@@ -1230,22 +1426,35 @@ impl Launcher {
         }
     }
 
-    fn add_player(&mut self) {
-        let name = self.servers.value(Field::AddPlayer).trim().to_string();
-        let valid = (3..=16).contains(&name.len())
-            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-        if !valid {
-            self.servers.invalid = Some((
-                Field::AddPlayer,
-                "A Minecraft name has 3 to 16 letters, digits or underscores.",
-            ));
+    /// Picks a friend: the card clicked is toggled in the student's list, saved at once. In the
+    /// Players tab (`server` is that server's folder) a friend picked there is let in on that
+    /// server too, as a friend is on every server the student creates.
+    fn toggle_friend(&mut self, name: &str, server: Option<&Path>) {
+        let was = friends::is_friend(&self.servers.friends, name);
+        if friends::toggle(&mut self.servers.friends, name) == was {
             return;
         }
-        self.servers.text(Field::AddPlayer).set(String::new());
-        self.server_command(
-            &format!("Letting {name} in"),
-            vec!["whitelist".into(), "add".into(), name],
-        );
+        if let Err(e) = friends::save(&self.servers.friends) {
+            self.servers.problem = Some(Problem::plain(trf(
+                "Your friends could not be saved: {error}",
+                &[("error", &e)],
+            )));
+        }
+        if !was {
+            if let Some(dir) = server {
+                let open = self.servers.open.as_deref() == Some(dir);
+                let listed = servers::entries(dir, "whitelist.json")
+                    .iter()
+                    .any(|(n, _)| n == name);
+                if open && !listed && self.servers.busy.is_none() {
+                    let name = name.to_string();
+                    self.server_command(
+                        &trf("Letting {name} in", &[("name", &name)]),
+                        vec!["whitelist".into(), "add".into(), name],
+                    );
+                }
+            }
+        }
     }
 
     /// A player's face, from the default skin their UUID picks in the build's own files (the
@@ -1389,7 +1598,11 @@ impl Launcher {
                     )
                 )
             } else {
-                format!("{} · {}", phase_label(&status), short(&e.dir))
+                format!(
+                    "{} · {}",
+                    phase_label(&status),
+                    self.servers.facts_line(&e.dir)
+                )
             };
             let dir = e.dir.clone();
             list = list.child(index_row(
@@ -1413,6 +1626,50 @@ impl Launcher {
             ));
         }
         page.child(list)
+    }
+
+    /// The end of the server's log, where it says why the game didn't start: in the window, as a
+    /// problem's button asks, since no student has to open the server's folder.
+    fn failure_log(&mut self, dir: &Path, cx: &mut Context<Self>) -> Div {
+        let t = self.theme;
+        let lines = servers::log_tail(dir, 60);
+        let body = if lines.is_empty() {
+            text(theme::CAPTION)
+                .text_color(t.muted)
+                .child(tr("The server wrote no log."))
+                .into_any_element()
+        } else {
+            div()
+                .flex()
+                .flex_col()
+                .font_family(theme::MONO)
+                .text_size(px(12.))
+                .line_height(px(19.))
+                .text_color(t.ink)
+                .children(lines.into_iter().map(|l| div().child(l)))
+                .into_any_element()
+        };
+        plate(&t)
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .p(px(20.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(self.tab_heading(tr("The server's log")))
+                    .child(
+                        button("log-hide", tr("Hide the log"), Kind::Secondary, &t).on_click(
+                            cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.servers.log_shown = false;
+                                cx.notify();
+                            }),
+                        ),
+                    ),
+            )
+            .child(body)
     }
 
     fn problem_notice(&self, p: Problem, cx: &mut Context<Self>) -> Div {
@@ -1548,25 +1805,21 @@ impl Launcher {
         } else {
             disabled(restart)
         };
-        let folder = dir.to_path_buf();
         let buttons = div()
             .flex()
             .flex_wrap()
             .items_center()
             .gap(px(8.))
             .child(start)
-            .child(restart)
-            .child(
-                button("server-folder", "Open the folder", Kind::Ghost, &t)
-                    .on_click(move |_, _, cx| crate::glass_toast::open(cx, &folder)),
-            );
+            .child(restart);
 
         let mut page = div()
             .flex()
             .flex_col()
             .gap(px(24.))
             .child(top)
-            .child(buttons);
+            .child(buttons)
+            .children(self.servers.log_shown.then(|| self.failure_log(dir, cx)));
         if let Some(label) = &busy {
             let last = self.servers.job_log.back().cloned().unwrap_or_default();
             page = page.child(
@@ -1666,6 +1919,8 @@ impl Launcher {
         page.child(body)
     }
 
+    /// The server at a glance: who is on it, its mode, who may join and its backups; and, while
+    /// it runs, how fast it goes on this computer.
     fn stats(&self, status: &Status) -> Div {
         let t = self.theme;
         let tile = |value: String, label: &'static str| {
@@ -1673,6 +1928,7 @@ impl Launcher {
                 .flex()
                 .flex_col()
                 .flex_1()
+                .min_w(px(140.))
                 .gap(px(4.))
                 .p(px(16.))
                 .child(text(theme::TITLE).text_color(t.ink).child(value))
@@ -1680,42 +1936,64 @@ impl Launcher {
         };
         let dash = || "–".to_string();
         let on = status.running();
-        div()
-            .flex()
-            .gap(px(12.))
+        let mode = self.servers.shown("world", "game_mode");
+        let mode = if mode.is_empty() {
+            dash()
+        } else {
+            MODES
+                .iter()
+                .find(|(id, _)| *id == mode)
+                .map_or(mode.clone(), |(_, label)| tr(label).to_string())
+        };
+        let friends_only = self
+            .servers
+            .setting("server", "whitelist")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let mut row = div().flex().flex_wrap().gap(px(12.)).child(tile(
+            if on {
+                format!(
+                    "{} / {}",
+                    status.players.len(),
+                    status.max_players.unwrap_or(0)
+                )
+            } else {
+                dash()
+            },
+            "Players online",
+        ));
+        if !mode.is_empty() {
+            row = row.child(tile(mode, "Game mode"));
+        }
+        row = row
             .child(tile(
-                if on {
-                    format!(
-                        "{} / {}",
-                        status.players.len(),
-                        status.max_players.unwrap_or(0)
-                    )
-                } else {
-                    dash()
-                },
-                "Players online",
+                if friends_only { tr("On") } else { tr("Off") }.to_string(),
+                "Friends only",
             ))
-            .child(tile(
-                status
-                    .tps
-                    .filter(|_| on)
-                    .map_or_else(dash, |v| format!("{v:.1}")),
-                "TPS · 20 is full speed",
-            ))
-            .child(tile(
-                status
-                    .mspt
-                    .filter(|_| on)
-                    .map_or_else(dash, |v| format!("{v:.1} ms")),
-                "MSPT · tick time",
-            ))
-            .child(tile(
-                status
-                    .ram_bytes
-                    .filter(|_| on)
-                    .map_or_else(dash, |b| format!("{:.2} GB", b as f64 / 1e9)),
-                "RAM",
-            ))
+            .child(tile(self.servers.backups.len().to_string(), "Backups"));
+        let mut rows = div().flex().flex_col().gap(px(12.)).child(row);
+        if on {
+            rows = rows.child(
+                div()
+                    .flex()
+                    .gap(px(12.))
+                    .child(tile(
+                        status.tps.map_or_else(dash, |v| format!("{v:.1}")),
+                        "TPS · 20 is full speed",
+                    ))
+                    .child(tile(
+                        status.mspt.map_or_else(dash, |v| format!("{v:.1} ms")),
+                        "MSPT · tick time",
+                    ))
+                    .child(tile(
+                        status
+                            .ram_bytes
+                            .map_or_else(dash, |b| format!("{:.2} GB", b as f64 / 1e9)),
+                        "RAM",
+                    )),
+            );
+        }
+        rows
     }
 
     fn overview_tab(&mut self, status: &Status, cx: &mut Context<Self>) -> Div {
@@ -2006,7 +2284,10 @@ impl Launcher {
                 }),
         );
 
-        // Who may join.
+        // Who may join: the friends-only switch, then a card per person. The cards are the
+        // student's friends and the students whose launcher is open now (not the college's two
+        // hundred computers): a card's switch makes a friend, who is let in on every server the
+        // student creates and at once on this one. Its buttons say what the friend may do here.
         let friends_only = self
             .servers
             .setting("server", "whitelist")
@@ -2018,71 +2299,120 @@ impl Launcher {
                 cx.notify();
             },
         ));
-        let add = div()
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .child(self.field(Field::AddPlayer, tr("A player's name"), 240., cx))
-            .child({
-                let b = button("player-add", "Let in", Kind::Secondary, &t);
-                if idle {
-                    b.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.add_player();
-                        cx.notify();
-                    }))
-                } else {
-                    disabled(b)
-                }
-            });
         let mut people: Vec<(String, String)> = whitelist.clone();
         for op in &ops {
             if !people.iter().any(|(n, _)| n.eq_ignore_ascii_case(op)) {
                 people.push((op.clone(), String::new()));
             }
         }
+        let cards = self.servers.cards(&people);
+        let me = self.player.clone();
         let mut allowed = div().flex().flex_col().border_t_1().border_color(rule);
-        for (i, (name, uuid)) in people.into_iter().enumerate() {
+        for (i, card) in cards.into_iter().enumerate() {
+            let name = card.name.clone();
             let op = is_op(&name);
             let listed = whitelist.iter().any(|(n, _)| n == &name);
-            let (n1, n2) = (name.clone(), name.clone());
-            let mut actions = div().flex().gap(px(2.)).child(self.small(
-                SharedString::from(format!("allowed-op-{i}")),
-                if op {
-                    "Remove operator"
-                } else {
-                    "Make operator"
-                },
-                idle,
-                cx,
-                move |this| {
-                    let verb = if op { "deop" } else { "op" };
-                    this.server_command("Changing operators", vec![verb.into(), n1.clone()]);
-                },
-            ));
-            if listed {
-                actions = actions.child(self.small(
-                    SharedString::from(format!("allowed-remove-{i}")),
-                    "Remove",
-                    idle,
-                    cx,
-                    move |this| {
-                        this.server_command(
-                            "Updating the list",
-                            vec!["whitelist".into(), "remove".into(), n2.clone()],
-                        );
-                    },
-                ));
+            let mine = me.as_deref() == Some(name.as_str());
+            let face = match card.uuid {
+                Some(uuid) if !uuid.is_empty() => self.head(&uuid, head),
+                _ => div().size(px(head)).flex_none(),
+            };
+            let mut actions = div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .justify_end()
+                .gap(px(2.));
+            if !mine {
+                let (n1, n2, n3) = (name.clone(), name.clone(), name.clone());
+                actions = actions
+                    .child(self.small(
+                        SharedString::from(format!("card-op-{i}")),
+                        if op {
+                            "Remove operator"
+                        } else {
+                            "Make operator"
+                        },
+                        idle,
+                        cx,
+                        move |this| {
+                            let verb = if op { "deop" } else { "op" };
+                            this.server_command(
+                                "Changing operators",
+                                vec![verb.into(), n1.clone()],
+                            );
+                        },
+                    ))
+                    .child(self.small(
+                        SharedString::from(format!("card-list-{i}")),
+                        if listed { "Remove" } else { "Let in" },
+                        idle,
+                        cx,
+                        move |this| {
+                            let verb = if listed { "remove" } else { "add" };
+                            this.server_command(
+                                if listed {
+                                    "Updating the list"
+                                } else {
+                                    "Letting someone in"
+                                },
+                                vec!["whitelist".into(), verb.into(), n2.clone()],
+                            );
+                        },
+                    ))
+                    .child(self.small(
+                        SharedString::from(format!("card-ban-{i}")),
+                        "Ban",
+                        running,
+                        cx,
+                        move |this| this.api_command(format!("ban {n3}")),
+                    ));
             }
-            let face = if uuid.is_empty() {
-                div().size(px(head)).flex_none()
+            let notes: Vec<String> = if mine {
+                vec![tr("You: this server's operator").to_string()]
             } else {
-                self.head(&uuid, head)
+                vec![
+                    op.then(|| {
+                        if listed {
+                            tr("Operator: can run every command")
+                        } else {
+                            tr("Operator (not on the list: can join anyway)")
+                        }
+                        .to_string()
+                    }),
+                    card.online.then(|| tr("Launcher open").to_string()),
+                ]
+                .into_iter()
+                .flatten()
+                .collect()
             };
-            let about = match (op, listed) {
-                (true, true) => Some(tr("Operator: can run every command")),
-                (true, false) => Some(tr("Operator (not on the list: can join anyway)")),
-                _ => None,
-            };
+            // The switch that makes a friend, its name beside it; not on the student's own card.
+            let (n4, folder) = (name.clone(), dir.to_path_buf());
+            let friend = (!mine).then(|| {
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(
+                        text(theme::CAPTION)
+                            .text_color(if card.friend { t.success } else { t.muted })
+                            .child(tr("Friend")),
+                    )
+                    .child(
+                        switch(
+                            SharedString::from(format!("card-friend-{i}")),
+                            card.friend,
+                            &t,
+                        )
+                        .on_click(cx.listener(
+                            move |this, _: &ClickEvent, _, cx| {
+                                this.toggle_friend(&n4, Some(&folder));
+                                cx.notify();
+                            },
+                        )),
+                    )
+            });
             allowed = allowed.child(
                 div()
                     .flex()
@@ -2090,18 +2420,31 @@ impl Launcher {
                     .gap(px(14.))
                     .min_h(px(theme::ROW))
                     .py(px(8.))
-                    .when(glass, |d| d.min_h(px(0.)).py(px(5.)))
+                    .when(glass, |d| d.min_h(px(0.)))
                     .border_b_1()
                     .border_color(rule)
                     .child(face)
                     .child(
                         div()
                             .flex()
-                            .flex_col()
                             .flex_1()
-                            .child(person(name.clone()))
-                            .children(about.map(|a| person_note(a.to_string()))),
+                            .min_w_0()
+                            .flex_col()
+                            .gap(px(2.))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.))
+                                    // A green dot: their launcher is open right now.
+                                    .when(card.online, |d| {
+                                        d.child(div().flex_none().size(px(8.)).bg(t.success))
+                                    })
+                                    .child(person(name)),
+                            )
+                            .children(notes.into_iter().map(person_note)),
                     )
+                    .children(friend)
                     .child(actions),
             );
         }
@@ -2115,7 +2458,7 @@ impl Launcher {
                     self.toggle_row(
                         "Friends only",
                         if friends_only {
-                            tr("On: only the players below can join.")
+                            tr("On: you, your friends and the players let in below can join.")
                         } else {
                             tr("Off: everyone on the club's network can join.")
                         }
@@ -2123,11 +2466,10 @@ impl Launcher {
                         toggle,
                     ),
                 )
-                .child(add)
-                .children(self.servers.invalid.and_then(|(f, e)| {
-                    (f == Field::AddPlayer)
-                        .then(|| text(theme::CAPTION).text_color(t.danger).child(tr(e)))
-                }))
+                .child(text(theme::CAPTION).text_color(t.muted).child(tr(
+                    "One card for each friend and for each student whose launcher is open now. \
+                     The switch makes a friend, let in on every server you create.",
+                )))
                 .child(allowed),
         );
 
@@ -2344,6 +2686,29 @@ impl Launcher {
         } else {
             tr("Used from the next start.")
         };
+        // Vanilla's own switches, for a club: no monster to deal with while building, no Nether
+        // to get lost in. Each is one of the server's `server.properties`, read at its next start;
+        // vanilla's default (on) is what an unwritten one means.
+        let vanilla = |key: &str| {
+            self.servers
+                .setting("properties", key)
+                .and_then(Value::as_bool)
+                .unwrap_or(true)
+        };
+        let monsters = vanilla("spawn-monsters");
+        let nether = vanilla("allow-nether");
+        let monsters_switch = switch("set-monsters", monsters, &t).on_click(cx.listener(
+            move |this, _: &ClickEvent, _, cx| {
+                this.set_setting("properties.spawn-monsters", (!monsters).to_string());
+                cx.notify();
+            },
+        ));
+        let nether_switch = switch("set-nether", nether, &t).on_click(cx.listener(
+            move |this, _: &ClickEvent, _, cx| {
+                this.set_setting("properties.allow-nether", (!nether).to_string());
+                cx.notify();
+            },
+        ));
         let form = div()
             .flex()
             .flex_col()
@@ -2366,6 +2731,22 @@ impl Launcher {
                 "Difficulty",
                 live.into(),
                 self.choice("set-difficulty", "world.difficulty", &DIFFICULTIES, cx),
+            ))
+            .child(self.setting_row(
+                "Monsters spawn",
+                format!(
+                    "{} {later}",
+                    tr("Off: no zombie, creeper or skeleton comes. Animals stay.")
+                ),
+                monsters_switch.into_any_element(),
+            ))
+            .child(self.setting_row(
+                "The Nether",
+                format!(
+                    "{} {later}",
+                    tr("Off: portals don't light, so nobody leaves for the Nether.")
+                ),
+                nether_switch.into_any_element(),
             ))
             .child(self.setting_row(
                 "Players can hurt each other (PvP)",
@@ -2548,7 +2929,14 @@ impl Launcher {
         };
         let toggle = switch("auto-backup", auto, &t).on_click(cx.listener(
             move |this, _: &ClickEvent, _, cx| {
-                this.set_setting("backups.every", if auto { "0".into() } else { "6h".into() });
+                this.set_setting(
+                    "backups.every",
+                    if auto {
+                        "0".into()
+                    } else {
+                        servers::AUTO_BACKUP.into()
+                    },
+                );
                 cx.notify();
             },
         ));
@@ -2862,28 +3250,22 @@ impl Launcher {
                         .into_any_element(),
                 ),
             ))
-            .child(pair(
-                row(
-                    tr("Most players at once").to_string(),
-                    players.into_any_element(),
-                ),
-                row(
-                    tr("Who can join").to_string(),
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(10.))
-                        .child(self.field(
-                            Field::Players,
-                            "Players allowed in, separated by commas (you first)",
-                            480.,
-                            cx,
-                        ))
-                        .child(text(theme::CAPTION).text_color(t.muted).child(tr(
-                            "The first one becomes an operator. Add more later on the Players tab.",
-                        )))
-                        .into_any_element(),
-                ),
+            .child(row(
+                tr("Most players at once").to_string(),
+                players.into_any_element(),
+            ))
+            .child(row(
+                tr("Who can join").to_string(),
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(10.))
+                    .child(text(theme::CAPTION).text_color(t.muted).child(tr(
+                        "The server is yours: you are its operator. Your friends are let in from \
+                         the start, on every server you create.",
+                    )))
+                    .child(self.create_cards(cx))
+                    .into_any_element(),
             ));
         let mut foot = div()
             .flex()
@@ -2956,6 +3338,89 @@ impl Launcher {
                 .occlude()
                 .child(card),
         )
+    }
+    /// The Create dialog's cards in the blocky look: one for each friend and for each student
+    /// whose launcher is open now. A click makes a friend, or takes one away: the card is then
+    /// the accent's, and a friend is let in on the server from the start.
+    fn create_cards(&mut self, cx: &mut Context<Self>) -> Div {
+        let t = self.theme;
+        let cards = self.servers.cards(&[]);
+        let mut grid = div().flex().flex_wrap().gap(px(8.));
+        for (i, card) in cards.into_iter().enumerate() {
+            let name = card.name.clone();
+            let first = name.chars().next().map(|c| c.to_uppercase().to_string());
+            grid = grid.child(
+                keyboard(
+                    div()
+                        .id(SharedString::from(format!("create-card-{i}")))
+                        .flex()
+                        .flex_1()
+                        .min_w(px(220.))
+                        .flex_basis(px(0.))
+                        .items_center()
+                        .gap(px(10.))
+                        .h(px(56.))
+                        .px(px(10.))
+                        .rounded(px(theme::RADIUS))
+                        .border_1()
+                        .border_color(if card.friend { t.accent } else { t.rule })
+                        .bg(if card.friend { t.plate_soft } else { t.surface })
+                        .cursor_pointer()
+                        .hover(|s| s.bg(t.plate_soft))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_none()
+                                .items_center()
+                                .justify_center()
+                                .size(px(30.))
+                                .rounded(px(theme::RADIUS))
+                                .bg(t.plate)
+                                .child(text(theme::UI).text_color(t.ink_soft).children(first)),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .flex_1()
+                                .min_w_0()
+                                .child(
+                                    text(theme::UI)
+                                        .text_color(t.ink)
+                                        .truncate()
+                                        .child(name.clone()),
+                                )
+                                .children(card.online.then(|| {
+                                    text(theme::CAPTION)
+                                        .text_color(t.success)
+                                        .child(tr("Launcher open"))
+                                })),
+                        )
+                        // The box of a friend is the accent's; the others' wait empty.
+                        .child(
+                            div()
+                                .flex_none()
+                                .size(px(18.))
+                                .rounded(px(4.))
+                                .border_2()
+                                .border_color(if card.friend { t.accent } else { t.muted })
+                                .when(card.friend, |d| d.bg(t.accent)),
+                        ),
+                    &t,
+                )
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.toggle_friend(&name, None);
+                    cx.notify();
+                })),
+            );
+        }
+        if self.servers.people.is_empty() && self.servers.friends.is_empty() {
+            return grid.child(text(theme::CAPTION).text_color(t.muted).child(tr(
+                "Nobody else has Horizon Club open right now. Their cards appear here as \
+                         they open it.",
+            )));
+        }
+        grid
     }
 }
 

@@ -6,6 +6,7 @@ pub mod desktop_seams;
 pub mod downloads;
 pub mod effects;
 pub mod first_play;
+pub mod friends;
 /// The game's app bundle on macOS: the game shows in the Dock under its own name and icon.
 #[cfg(unix)]
 pub mod game_app;
@@ -13,8 +14,10 @@ pub mod game_log;
 pub mod heads;
 pub mod i18n;
 pub mod identity;
+pub mod invited;
 pub mod mojang;
 pub mod online;
+pub mod panic_report;
 pub mod pictures;
 pub mod process;
 pub mod proxy;

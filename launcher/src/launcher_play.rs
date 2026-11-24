@@ -168,7 +168,8 @@ impl Launcher {
         // The game's server list: the club's servers, then the hosted servers announced (section
         // 6). Neither write keeps the game from starting: Home says why it failed.
         let announced = online::list(&club::online_dir(), server_list::now());
-        let servers = server_list::club_servers(&self.config, &announced);
+        let servers =
+            server_list::club_servers(&self.config, &announced, &self.servers.remembered());
         let mut failed = server_list::replace(&home, &servers).err();
         // A student's first Play: the options the club chose for them (section 8).
         if failed.is_none() {

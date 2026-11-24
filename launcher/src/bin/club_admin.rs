@@ -1,7 +1,9 @@
 //! `club-admin`: the club supervisor's command-line tool for the share
 //! (docs/school-edition/README.md, « Déployer »). It lives in the share's `admin\` folder, which
 //! students cannot open, and it is the only thing that writes in the club root: the builds of
-//! `core\`, `managed.txt`, `app\current.txt`, the bootstrap and `club.toml`'s edits.
+//! `core\`, `managed.txt`, `app\current.txt`, the bootstrap and `club.toml`'s edits. Opened as
+//! `HorizonClubSetup.exe` with nothing on its command line, it is the installer, which makes the
+//! share from nothing (`club_admin/installer.rs`).
 //!
 //! The club root is `--root`'s, else `HORIZON_CLUB_ROOT`'s, else the folder above the tool's own
 //! `admin\` folder, else the search the launcher makes (`club::root`). Whatever it is, it is
@@ -10,6 +12,8 @@
 //! launcher's own `tr`/`trf`, so they are in the club's language.
 #[path = "club_admin/edits.rs"]
 mod edits;
+#[path = "club_admin/installer.rs"]
+mod installer;
 #[path = "club_admin/managed.rs"]
 mod managed;
 #[path = "club_admin/report.rs"]
@@ -28,7 +32,7 @@ use std::path::{Path, PathBuf};
 #[command(
     name = "club-admin",
     version = backend::VERSION,
-    about = "The club supervisor's tool for the share: check it, write the game's rule, publish the launcher, install and prepare the game builds.",
+    about = "The club supervisor's tool for the share: install it, check it, write the game's rule, publish the launcher, install and prepare the game builds.",
     disable_help_subcommand = true
 )]
 struct Cli {
@@ -63,6 +67,14 @@ enum Command {
         version: String,
         #[arg(long)]
         bootstrap: Option<PathBuf>,
+    },
+    /// Install Horizon Club on the club's share from the start: the launcher, the bootstrap and
+    /// this tool, the share's folders, club.toml and managed.txt. Where --root says; else on the
+    /// share this program sits on; else it asks, with Windows' folder picker. A folder on this
+    /// computer is used only to try, and it asks first. --yes answers yes to every question.
+    Install {
+        #[arg(long)]
+        yes: bool,
     },
     /// Bring the share's launcher to the club's newest release on GitHub: downloaded, checked by
     /// its hash, put in app\<version>\, with app\current.txt pointing at it. Every PC uses it the
@@ -110,7 +122,22 @@ enum ServerCommand {
 }
 
 fn main() {
-    let cli = Cli::parse();
+    // `HorizonClubSetup.exe` is this program under the installer's name: opened with nothing on
+    // its command line, it installs.
+    let setup = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .is_some_and(|name| name.eq_ignore_ascii_case("HorizonClubSetup.exe"));
+    let mut args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    if setup && args.len() == 1 {
+        args.push("install".into());
+    }
+    let cli = Cli::parse_from(args);
+    // The installer finds or asks for the club's folder itself: none is resolved for it.
+    if let Command::Install { yes } = &cli.command {
+        i18n::set(i18n::Language::French);
+        std::process::exit(installer::run(cli.root.as_deref(), *yes));
+    }
     let root = match resolve_root(cli.root.as_deref()) {
         Ok(root) => root,
         Err(error) => {
@@ -308,6 +335,7 @@ fn run(
             Ok(0)
         }
         Command::Update { check } => update_the_share(root, *check),
+        Command::Install { .. } => unreachable!("handled before the club's folder is resolved"),
         Command::InstallCore { from, tag } => {
             let tag = tag
                 .clone()
