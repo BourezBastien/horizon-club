@@ -55,7 +55,11 @@ pub(super) fn add_fonts(cx: &mut App) {
 fn run_launcher() {
     // The club's root is found from where the launcher started, before the data folder becomes
     // the current directory (the share is read-only, and a UNC path is a poor working directory).
-    let _ = horizon_launcher::club::root();
+    let root = horizon_launcher::club::root();
+    // A club folder this computer opens is remembered: an installer looks there for the game.
+    if horizon_launcher::club::has_root() {
+        horizon_launcher::club::remember(&root);
+    }
     let _ = std::env::set_current_dir(horizon_launcher::club::data_dir());
     perf::process_started();
     // The GPU's texture limit, which caps the pictures made from disk (`picture_cache`).

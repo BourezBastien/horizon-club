@@ -139,10 +139,105 @@ pub fn online_dir() -> PathBuf {
     root().join(ONLINE_DIR)
 }
 
+// ----- The club folders opened on this computer ---------------------------------------------------
+
+/// Where they are kept, in the launcher's data folder: a club folder a line, the last opened first.
+const KNOWN: &str = "clubs.txt";
+/// How many are kept: enough for every club folder a computer opens.
+const KNOWN_MOST: usize = 12;
+
+/// Remembers `folder` as a club folder opened on this computer ([`known`]): an installer opened
+/// in another folder then looks in these for the game, without asking. Nothing is written when
+/// the folder already comes first, nor for one with no name; a file that cannot be written is
+/// not an error, as nothing else depends on it.
+pub fn remember(folder: &Path) {
+    remember_in(&data_dir().join(KNOWN), folder);
+}
+
+/// The club folders opened on this computer that are still there, the last opened first.
+pub fn known() -> Vec<PathBuf> {
+    known_in(&data_dir().join(KNOWN))
+}
+
+/// [`remember`], with the file given.
+pub(crate) fn remember_in(file: &Path, folder: &Path) {
+    let folder = tidy(folder);
+    if folder.as_os_str().is_empty() {
+        return;
+    }
+    let mut folders: Vec<PathBuf> = read_known(file).into_iter().map(|f| tidy(&f)).collect();
+    if folders
+        .first()
+        .is_some_and(|first| same_folder(first, &folder))
+    {
+        return;
+    }
+    folders.retain(|known| !same_folder(known, &folder));
+    folders.insert(0, folder);
+    folders.truncate(KNOWN_MOST);
+    let _ = write_known(file, &folders);
+}
+
+/// [`known`], with the file given.
+pub(crate) fn known_in(file: &Path) -> Vec<PathBuf> {
+    read_known(file)
+        .into_iter()
+        .filter(|folder| folder.is_dir())
+        .collect()
+}
+
+/// A folder as it is kept: without a separator at the end (`C:\Horizon\` is `C:\Horizon`), a
+/// drive's own (`C:\`) keeping its one.
+fn tidy(folder: &Path) -> PathBuf {
+    let text = folder.to_string_lossy();
+    let stem = text.trim_end_matches(['\\', '/']);
+    let whole = stem.len() == 2 && stem.ends_with(':');
+    PathBuf::from(if whole { &text[..stem.len() + 1] } else { stem })
+}
+
+/// Two spellings of one folder: the same path, compared without regard to case and to a
+/// separator at the end (`C:\Horizon` and `c:\horizon\`).
+fn same_folder(a: &Path, b: &Path) -> bool {
+    let text = |p: &Path| {
+        p.to_string_lossy()
+            .trim_end_matches(['\\', '/'])
+            .to_string()
+    };
+    text(a).eq_ignore_ascii_case(&text(b))
+}
+
+/// The folders in the file at `path`, each line one, as written; blank lines and a file that
+/// cannot be read hold none.
+fn read_known(path: &Path) -> Vec<PathBuf> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(PathBuf::from)
+        .collect()
+}
+
+/// Writes the folders to `path`, a line each: written beside, then renamed over it, so a launcher
+/// starting meanwhile reads either list whole or none.
+fn write_known(path: &Path, folders: &[PathBuf]) -> std::io::Result<()> {
+    if let Some(folder) = path.parent() {
+        std::fs::create_dir_all(folder)?;
+    }
+    let mut text = String::new();
+    for folder in folders {
+        text.push_str(&folder.display().to_string());
+        text.push('\n');
+    }
+    let partial = path.with_extension("txt.tmp");
+    std::fs::write(&partial, text)?;
+    std::fs::rename(partial, path)
+}
+
 /// Whether build folder `a` is newer than `b`, for "the newest folder name": digit runs compare
 /// as numbers and the rest letter by letter, so the CI's `club-10-…` follows `club-9-…` as its
 /// number says (plain text would sort `club-9` last), and a date in a name still orders itself.
-pub(crate) fn newer(a: &str, b: &str) -> std::cmp::Ordering {
+pub fn newer(a: &str, b: &str) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     fn digit(c: char) -> bool {
         c.is_ascii_digit()
@@ -332,5 +427,50 @@ mod tests {
             ],
             "newest first"
         );
+    }
+
+    /// The club folders opened on this computer: the last opened comes first, a folder is listed
+    /// once whatever its spelling, and one that is gone is not listed.
+    #[test]
+    fn the_club_folders_opened_are_kept_the_last_one_first() {
+        let root = std::env::temp_dir().join(format!("horizon-club-known-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (file, first, second) = (
+            root.join("launcher").join("clubs.txt"),
+            root.join("Premier"),
+            root.join("Second"),
+        );
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        // Nothing is kept yet: none, and no file to read.
+        assert!(known_in(&file).is_empty());
+        // A folder with no name is none to remember.
+        remember_in(&file, Path::new(""));
+        assert!(!file.exists());
+        remember_in(&file, &first);
+        remember_in(&file, &second);
+        assert_eq!(known_in(&file), [second.clone(), first.clone()]);
+        // Opened again, the first comes back first; its other spelling is the same folder.
+        let again = PathBuf::from(format!("{}\\", first.display()));
+        remember_in(&file, &again);
+        remember_in(&file, &first);
+        assert_eq!(known_in(&file), [first.clone(), second.clone()]);
+        // Remembering the one that already comes first writes nothing: the file keeps its date.
+        let written = std::fs::metadata(&file).unwrap().modified().unwrap();
+        remember_in(&file, &first);
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().modified().unwrap(),
+            written
+        );
+        // A folder that is no longer there is not listed, and the file holds a line a folder.
+        std::fs::remove_dir_all(&second).unwrap();
+        assert_eq!(known_in(&file), std::slice::from_ref(&first));
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            format!("{}\n{}\n", first.display(), second.display())
+        );
+        // A file that cannot be read holds none.
+        assert!(known_in(&root.join("elsewhere")).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -68,12 +68,11 @@ enum Command {
         #[arg(long)]
         bootstrap: Option<PathBuf>,
     },
-    /// Install Horizon Club on the club's share from the start: the launcher, the bootstrap and
-    /// this tool, the share's folders, club.toml and managed.txt, then the game when --game names
-    /// a folder holding a build already prepared (else it asks, and cancelling leaves the game
-    /// for club-admin install-core). Where --root says; else on the share this program sits on;
-    /// else it asks, with Windows' folder picker. A folder on this computer is used only to try,
-    /// and it asks first. --yes answers yes to every question.
+    /// Install Horizon Club from the start, asking nothing: the launcher, the bootstrap and this
+    /// tool, the folders a club folder holds, club.toml and managed.txt, then the game. It all goes
+    /// into the folder this program is in (--root names another). The programs come from beside
+    /// it or from GitHub; the game from --game, else from the folder's core\, else from another
+    /// club folder of this computer. --yes: for a script, the window doesn't wait for Enter.
     Install {
         /// A folder holding a game build already prepared, to put into core\.
         #[arg(long)]
@@ -153,6 +152,8 @@ fn main() {
     // Everything the library does with the club's folders now goes through this root, spelled
     // as given: the paths it writes are the ones the students' launchers read.
     std::env::set_var("HORIZON_CLUB_ROOT", &root);
+    // A club folder this computer opens is remembered: an installer looks there for the game.
+    club::remember(&root);
     let config = config::Config::load();
     let language = config
         .as_ref()
