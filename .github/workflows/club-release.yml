@@ -5,6 +5,7 @@ name: club release
 #   HorizonClubLauncher.exe   the launcher, which goes to app\<version>\ on the club's share
 #   HorizonClub.exe           the bootstrap, which goes to the share's root
 #   club-admin.exe            the supervisor's tool, which goes to admin\
+#   HorizonClubSetup.exe      the same tool under the installer's name: opened, it installs
 #   SHA256SUMS.txt            the SHA-256 of each: a launcher installs an update only when it matches
 #
 # The tag is `v` and the launcher's version (launcher/Cargo.toml): the launchers on a club's share
@@ -68,10 +69,12 @@ jobs:
           mkdir -p out
           cp launcher/target/release/HorizonClubLauncher.exe launcher/target/release/club-admin.exe out/
           cp launcher/bootstrap/target/release/HorizonClub.exe out/
+          # The installer is the supervisor's tool under another name (it installs when it is
+          # opened with nothing on its command line under that name).
+          cp launcher/target/release/club-admin.exe out/HorizonClubSetup.exe
           # `--text`: `<hash>  <name>` on every system. Binary mode (Git for Windows' default)
           # writes `<hash> *<name>`, which a launcher before 0.3.3 does not read.
-          (cd out && sha256sum --text HorizonClubLauncher.exe HorizonClub.exe club-admin.exe > SHA256SUMS.txt)
-          cat out/SHA256SUMS.txt
+          (cd out && sha256sum --text HorizonClubLauncher.exe HorizonClub.exe club-admin.exe HorizonClubSetup.exe > SHA256SUMS.txt)
       - name: The release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -91,6 +94,5 @@ jobs:
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$version" --generate-notes
             release=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json databaseId --jq .databaseId)
           fi
-          gh release upload "$TAG" out/HorizonClubLauncher.exe out/HorizonClub.exe out/club-admin.exe out/SHA256SUMS.txt \
-            --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload "$TAG" out/HorizonClubLauncher.exe out/HorizonClub.exe out/club-admin.exe out/HorizonClubSetup.exe out/SHA256SUMS.txt --repo "$GITHUB_REPOSITORY" --clobber
           gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$release" -F make_latest="$make_latest" --silent

@@ -50,6 +50,7 @@ address = "mc-club.example.edu"  # a port after a colon only when it is not 2556
 render_distance = 8
 simulation_distance = 5
 max_fps = 60
+gui_scale = 2                    # the interface's size: 0 lets the game choose, else 1 to 4
 
 [lan]
 open = true                      # a world may be opened to the LAN (vanilla's Open to LAN)
@@ -121,6 +122,22 @@ runs and deleted when it stops: `online\<COMPUTERNAME>.json`:
 `host` is the PC's address on the network the club's servers are on (the local address of a UDP
 socket connected towards the first club server, else towards `255.255.255.255`).
 
+Who has the launcher open is said the same way, in `online\people\<player name>.json`, while the
+launcher runs:
+
+```json
+{"name": "Jdupont", "at": 1763800000}
+```
+
+A name that is not a Minecraft name (3 to 16 letters, digits or `_`) is not read: the folder is
+every student's to write, and these names go into commands.
+
+The servers a student was invited to are remembered on their own computer, in
+`%LOCALAPPDATA%\HorizonClub\launcher\invited.json`: a hosted server they joined, and one a
+friend hosts. The sidebar's second group lists them, the announced ones first; the game's list
+holds those that are off too, to be joined from the game when they come back. One that nobody
+announced for 120 days is forgotten.
+
 ## 7. Hosting (the Servers page)
 
 Kept as it works today, with these changes:
@@ -132,13 +149,24 @@ Kept as it works today, with these changes:
 - the EULA file is written when `eula_accepted` is true; with it false the page says the
   supervisor has to accept it;
 - no Tailscale, no internet panel, no partner banner;
-- the page exists only when `hosting.enabled` is true.
+- the page exists only when `hosting.enabled` is true;
+- who may join is picked from cards, never typed: one for each friend and one for each student
+  whose launcher is open now. A card's switch makes a friend (`friends.json` in the student's
+  launcher folder), and every server the student creates lets their friends in from the start,
+  the student being the operator. The Players tab has the same cards, with the buttons that
+  make an operator, let in, remove, kick and ban;
+- the server's folder is never shown nor opened from the window: the lists say its mode, how
+  many players it takes and how many backups it holds, and a game that did not start shows its
+  log in the window;
+- the world is backed up automatically every 10 minutes while the server runs (12 kept): the
+  supervisor's own 6 hours would never come during a club's half hour.
 
 ## 8. A student's first Play
 
 When `options.txt` is missing from the game home, the launcher writes it: the values of
-`[game]`, the game's language (`lang:fr_fr` when the club's language is `fr`), and the two
-switches that skip vanilla's first-start screens (`onboardAccessibility:false`,
+`[game]`, the game's language (`lang:fr_fr` when the club's language is `fr`), the music off
+(`soundCategory_music:0.0`: the club plays together in a room, and every other sound stays), and
+the two switches that skip vanilla's first-start screens (`onboardAccessibility:false`,
 `skipMultiplayerWarning:true`). `horizon-graphics.txt` gets the lines of Horizon's
 "Performance" preset (`graphics_preset.rs`), so weak PCs start quick. `horizon-extras.txt` gets
 `noAi:true`. A student may then change anything in the game's own screens.

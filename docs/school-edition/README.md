@@ -25,13 +25,17 @@ Décisions prises avec le responsable du club :
 ├─ app\current.txt, app\<version>\   le launcher, versionné : une mise à jour = une ligne
 ├─ core\<build>\                     horizon-client.exe, horizon-server.exe, horizon-prepare.exe
 │   └─ .local\horizon-client\26.3\   les fichiers du jeu : une seule copie pour le collège
-├─ online\                           les serveurs en ligne créés par les élèves
+├─ online\                           les serveurs en ligne créés par les élèves, et online\people\,
+│                                    qui dit qui a ouvert son launcher
 └─ admin\club-admin.exe              les outils du responsable
 
 %LOCALAPPDATA%\HorizonClub\          par poste et par session Windows
 ├─ launcher\                         réglages, journaux, copie locale du jeu, serveurs hébergés
+│   (servers\<nom>\), amis (friends.json), serveurs invités (invited.json)
 └─ game\                             mondes, options, servers.dat, captures, plantages
 ```
+
+Un serveur hébergé depuis la page Serveurs vit donc **sur l'ordinateur de l'élève qui l'a créé**, dans `%LOCALAPPDATA%\HorizonClub\launcher\servers\<nom>\` : il n'est pas sur le partage, et il ne tourne que tant que son launcher est ouvert.
 
 ## La règle du jeu (la feature `managed`)
 
@@ -128,10 +132,17 @@ Trois étapes, la première et la troisième avec les droits d'un administrateur
    | racine | `HorizonClub.exe`, `club.toml`, `managed.txt` | écrit | lecture |
    | `app\` | le launcher, version par version, et `current.txt` | écrit | lecture |
    | `core\` | les builds du jeu et leurs fichiers | écrit | lecture |
-   | `online\` | les serveurs hébergés par les élèves, annoncés là | écrit | écrit |
+   | `online\` | les serveurs hébergés par les élèves, annoncés là, et `online\people\` | écrit | écrit |
    | `admin\` | `club-admin.exe` | seul | aucun droit |
 
-2. **Publier** : copier le launcher dans `app\<version>\HorizonClubLauncher.exe`, le cœur de jeu dans `core\<build>\`, l'amorce et les deux fichiers à la racine, puis écrire le numéro de version dans `app\current.txt`. Chaque poste a la nouvelle version à l'ouverture suivante ; revenir en arrière, c'est changer la ligne.
+2. **Installer** : ouvrir `HorizonClubSetup.exe` (dans la release, voir plus bas). Horizon Club s'installe une seule fois, sur le partage, jamais sur un poste d'élève, et l'installateur ne s'en remet pas au hasard du dossier d'où il est lancé :
+   - lancé depuis le partage (un chemin `\\SERVEUR\Horizon` ou un lecteur réseau mappé), il s'installe là, après une confirmation ;
+   - lancé depuis un dossier de l'ordinateur, il demande où est le partage : la fenêtre de Windows « choisir un dossier » s'ouvre, et à défaut le chemin se tape ;
+   - un dossier qui est sur l'ordinateur n'est utilisé que si le responsable le confirme (« pour un essai »).
+
+   Il pose l'amorce à la racine, le launcher dans `app\<version>\` avec `current.txt`, `club-admin.exe` dans `admin\`, écrit `managed.txt`, un `club.toml` modèle s'il n'y en a pas, et crée `core\` et `online\people\`. Les fichiers de la release posés à côté de lui servent tels quels (installation sans réseau) ; sinon il les télécharge de GitHub ; dans les deux cas chacun est vérifié par son empreinte. En ligne de commande : `admin\club-admin.exe install --root \\SERVEUR\Horizon` (`--yes` pour un script).
+
+   Il reste alors, et l'installateur le dit : `club-admin install-core --from <dossier du jeu construit>` puis `club-admin prepare` pour le jeu, corriger `club.toml` puis `club-admin sync`, `tools/school/setup-share.ps1` pour les droits, et le raccourci sur chaque poste.
 
 3. **Chaque poste** (`tools/school/setup-pc.ps1`, à la main ou par stratégie de groupe) : le raccourci sur le bureau commun et deux règles de pare-feu, entrantes depuis le réseau local seulement : TCP 25565 à 25575 (les serveurs hébergés depuis la page Serveurs) et UDP 4445 (la découverte des mondes ouverts au réseau local). **Ce script n'a pas pu être essayé** : il demande les droits d'administrateur et modifie la machine.
 
@@ -141,7 +152,7 @@ Une limite à connaître : depuis le menu pause du jeu, « Ouvrir au LAN » pren
 
 Le launcher est une seule fois sur le partage : `app\<version>\`, et `app\current.txt` dit la version que les postes démarrent. Une mise à jour se fait donc **une fois, sur le partage** : chaque poste a la nouvelle version à l'ouverture suivante, et rien ne s'installe sur les postes des élèves.
 
-Les versions sont les *releases* du dépôt public du club. Une release porte quatre fichiers : `HorizonClubLauncher.exe`, `HorizonClub.exe` (l'amorce), `club-admin.exe`, et `SHA256SUMS.txt`, l'empreinte SHA-256 de chacun.
+Les versions sont les *releases* du dépôt public du club. Une release porte cinq fichiers : `HorizonClubLauncher.exe`, `HorizonClub.exe` (l'amorce), `club-admin.exe`, `HorizonClubSetup.exe` (l'installateur : le même programme que `club-admin.exe`, sous le nom qui l'ouvre en installant), et `SHA256SUMS.txt`, l'empreinte SHA-256 de chacun.
 
 - **Depuis le launcher** : à son ouverture, si la session peut écrire dans `app\` (celle du responsable, jamais celle d'un élève), le launcher cherche la dernière release. Quand elle est plus récente que la sienne, il demande « Mettre à jour » : il la télécharge, vérifie son empreinte, la pose dans `app\<version>\` et change `current.txt`. La version d'avant reste ; « Relancer maintenant » rouvre le launcher sur la nouvelle.
 - **Sans fenêtre** : `admin\club-admin.exe update` fait la même chose depuis une ligne de commande (sur le serveur de fichiers, à la main ou par une tâche planifiée) ; `--check` dit seulement s'il y en a une plus récente.
@@ -159,7 +170,7 @@ Seul le launcher se met à jour ainsi : le cœur de jeu (`core\`) se dépose tou
 
 Le jeu, lui, se construit avec le workflow `club core` (`gh workflow run club-core.yml --ref club`) : de 35 à 80 minutes sur un poste prêté par GitHub, en artefact à déposer dans `core\` avec `club-admin install-core`.
 
-Sans le workflow, une release se fait à la main, avec les mêmes quatre fichiers (c'est ce qu'ont fait les versions 0.3.0 et 0.3.1) : construire sous `RUSTFLAGS=-C target-feature=+crt-static` le launcher et `club-admin` (`cargo build --release --manifest-path launcher/Cargo.toml --bin HorizonClubLauncher --bin club-admin`) et l'amorce (`cd launcher/bootstrap && cargo build --release`) ; écrire `SHA256SUMS.txt`, une ligne `<empreinte>  <nom du fichier>` par exécutable (`sha256sum HorizonClubLauncher.exe HorizonClub.exe club-admin.exe > SHA256SUMS.txt`) ; puis `gh release create v<version> --verify-tag --title <version> --notes-file <notes> --latest` avec ces quatre fichiers.
+Sans le workflow, une release se fait à la main, avec les mêmes fichiers (c'est ce qu'ont fait les versions 0.3.0 et 0.3.1) : construire sous `RUSTFLAGS=-C target-feature=+crt-static` le launcher et `club-admin` (`cargo build --release --manifest-path launcher/Cargo.toml --bin HorizonClubLauncher --bin club-admin`) et l'amorce (`cd launcher/bootstrap && cargo build --release`) ; recopier `club-admin.exe` sous le nom `HorizonClubSetup.exe` ; écrire `SHA256SUMS.txt`, une ligne `<empreinte>  <nom du fichier>` par exécutable (`sha256sum HorizonClubLauncher.exe HorizonClub.exe club-admin.exe HorizonClubSetup.exe > SHA256SUMS.txt`) ; puis `gh release create v<version> --verify-tag --title <version> --notes-file <notes> --latest` avec ces cinq fichiers.
 
 ## Points de vigilance
 
