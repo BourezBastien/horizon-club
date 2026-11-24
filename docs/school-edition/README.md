@@ -135,16 +135,15 @@ Trois étapes, la première et la troisième avec les droits d'un administrateur
    | `online\` | les serveurs hébergés par les élèves, annoncés là, et `online\people\` | écrit | écrit |
    | `admin\` | `club-admin.exe` | seul | aucun droit |
 
-2. **Installer** : ouvrir `HorizonClubSetup.exe` (dans la release, voir plus bas), et lui seul. Les autres fichiers de la release ne se lancent pas seuls : `HorizonClub.exe` cherche `app\current.txt` à côté de lui, et `HorizonClubLauncher.exe` a besoin de `club.toml` et du jeu ; c'est le dossier entier qui fait Horizon Club. Horizon Club s'installe une seule fois, sur le partage, jamais sur un poste d'élève, et l'installateur ne s'en remet pas au hasard du dossier d'où il est lancé :
-   - lancé depuis le partage (un chemin `\\SERVEUR\Horizon` ou un lecteur réseau mappé), il s'installe là, après une confirmation ;
-   - lancé depuis un dossier de l'ordinateur, il demande où est le partage : la fenêtre de Windows « choisir un dossier » s'ouvre, et à défaut le chemin se tape ;
-   - un dossier qui est sur l'ordinateur n'est utilisé que si le responsable le confirme (« pour un essai »).
+2. **Installer** : ouvrir `HorizonClubSetup.exe` (dans la release, voir plus bas), et lui seul. C'est le seul fichier à télécharger, et il ne pose aucune question. Les autres fichiers de la release ne se lancent pas seuls : `HorizonClub.exe` cherche `app\current.txt` à côté de lui, et `HorizonClubLauncher.exe` a besoin de `club.toml` et du jeu ; c'est le dossier entier qui fait Horizon Club. Horizon Club s'installe une seule fois, sur le partage, jamais sur un poste d'élève.
 
-   Il pose l'amorce à la racine, le launcher dans `app\<version>\` avec `current.txt`, `club-admin.exe` dans `admin\`, écrit `managed.txt`, un `club.toml` modèle s'il n'y en a pas, et crée `core\` et `online\people\`. Les fichiers de la release posés à côté de lui servent tels quels (installation sans réseau) ; sinon il les télécharge de GitHub ; dans les deux cas chacun est vérifié par son empreinte.
+   Il s'installe dans le dossier où il se trouve : le poser dans le dossier du partage (un chemin `\\SERVEUR\Horizon` ou un lecteur réseau mappé) et l'ouvrir là. Il pose l'amorce à la racine, le launcher dans `app\<version>\` avec `current.txt`, `club-admin.exe` dans `admin\`, écrit `managed.txt`, un `club.toml` modèle s'il n'y en a pas, et crée `core\` et `online\people\`. Les fichiers de la release posés à côté de lui servent tels quels (installation sans réseau) ; sinon il les télécharge de GitHub ; dans les deux cas chacun est vérifié par son empreinte.
 
-   Il demande ensuite **où est le jeu**. La release n'en contient aucun fichier : le jeu vient d'un dossier qui l'a déjà, un build préparé (par exemple le `core\26.3-…` d'une autre installation). L'installateur le copie dans `core\` et écrit son `horizon-data.bin` pour le dossier du club : quelques minutes. Annuler laisse le jeu à poser plus tard avec `club-admin install-core --from <dossier>`.
+   **Le jeu**, il le cherche seul, dans cet ordre : déjà dans `core\` du dossier, il le garde ; sinon sur cet ordinateur, dans un dossier de club qui l'a (un dossier où `HorizonClub.exe` a été ouvert), et il le copie dans `core\` ; sinon il le dit en une ligne à la fin : recopier le dossier `core` d'un dossier qui a le jeu à côté de `HorizonClubSetup.exe`, puis rouvrir l'installateur. La release n'en contient aucun fichier : le jeu vient d'un build préparé (par exemple le `core\26.3-…` d'une autre installation). Il écrit son `horizon-data.bin` pour le dossier du club : quelques minutes en tout.
 
-   En ligne de commande : `admin\club-admin.exe install --root \\SERVEUR\Horizon --game <dossier du jeu>` (`--yes` pour un script).
+   Rouvert dans un dossier déjà installé, il met le launcher à jour et garde le jeu.
+
+   Pour un script : `admin\club-admin.exe install --root \\SERVEUR\Horizon --game <dossier du jeu> --yes`. `--root` installe dans un autre dossier que celui de l'outil, `--game` dit où prendre le jeu, `--yes` ferme la fenêtre sans attendre Entrée.
 
    Il reste alors, et l'installateur le dit : corriger `club.toml` puis `club-admin sync`, `tools/school/setup-share.ps1` pour les droits, et le raccourci sur chaque poste. `admin\club-admin.exe check` dit ensuite si le dossier est prêt.
 
@@ -156,7 +155,7 @@ Une limite à connaître : depuis le menu pause du jeu, « Ouvrir au LAN » pren
 
 Le launcher est une seule fois sur le partage : `app\<version>\`, et `app\current.txt` dit la version que les postes démarrent. Une mise à jour se fait donc **une fois, sur le partage** : chaque poste a la nouvelle version à l'ouverture suivante, et rien ne s'installe sur les postes des élèves.
 
-Les versions sont les *releases* du dépôt public du club. Une release porte cinq fichiers : `HorizonClubLauncher.exe`, `HorizonClub.exe` (l'amorce), `club-admin.exe`, `HorizonClubSetup.exe` (l'installateur : le même programme que `club-admin.exe`, sous le nom qui l'ouvre en installant), et `SHA256SUMS.txt`, l'empreinte SHA-256 de chacun.
+Les versions sont les *releases* du dépôt public du club. Une release porte cinq fichiers : `HorizonClubLauncher.exe`, `HorizonClub.exe` (l'amorce), `club-admin.exe`, `HorizonClubSetup.exe` (l'installateur : le même programme que `club-admin.exe`, sous le nom qui l'ouvre en installant), et `SHA256SUMS.txt`, l'empreinte SHA-256 de chacun. Pour installer, un seul est à télécharger : `HorizonClubSetup.exe`, qui prend les autres lui-même. Les cinq restent dans la release parce que la mise à jour du launcher les y cherche.
 
 - **Depuis le launcher** : à son ouverture, si la session peut écrire dans `app\` (celle du responsable, jamais celle d'un élève), le launcher cherche la dernière release. Quand elle est plus récente que la sienne, il demande « Mettre à jour » : il la télécharge, vérifie son empreinte, la pose dans `app\<version>\` et change `current.txt`. La version d'avant reste ; « Relancer maintenant » rouvre le launcher sur la nouvelle.
 - **Sans fenêtre** : `admin\club-admin.exe update` fait la même chose depuis une ligne de commande (sur le serveur de fichiers, à la main ou par une tâche planifiée) ; `--check` dit seulement s'il y en a une plus récente.
