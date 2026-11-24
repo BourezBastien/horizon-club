@@ -321,6 +321,42 @@ fn a_servers_backups_are_counted_from_its_folder() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// A backup goes to the trash by its file name alone: any other name, or one that could leave
+/// the backups folder, is refused before anything is touched.
+#[test]
+fn a_backup_is_deleted_by_its_file_name_and_nothing_else() {
+    let dir = scratch("delete-backup");
+    fs::create_dir_all(backups_folder(&dir)).unwrap();
+    let name = "2026-10-19_11-28-57-auto.zip";
+    let file = backups_folder(&dir).join(name);
+    fs::write(&file, "a zip").unwrap();
+    let trashed: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+    let trash = |path: &Path| {
+        trashed.lock().unwrap().push(path.to_path_buf());
+        Ok(())
+    };
+    let taken = || trashed.lock().unwrap().clone();
+    // A name that is not a backup's, or that could leave the folder: nothing is taken.
+    for bad in [
+        "",
+        ".zip",
+        "..",
+        "a/b.zip",
+        r"..\x.zip",
+        "notes.txt",
+        ".hidden.zip",
+    ] {
+        assert!(delete_backup_with(&dir, bad, trash).is_err(), "{bad:?}");
+    }
+    assert!(taken().is_empty());
+    // A backup that is already gone is an error, and nothing is taken.
+    assert!(delete_backup_with(&dir, "2026-10-19_11-28-58-auto.zip", trash).is_err());
+    assert!(taken().is_empty());
+    delete_backup_with(&dir, name, trash).unwrap();
+    assert_eq!(taken(), [file]);
+    let _ = fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_new_game_mode_reaches_the_players_on_a_running_server() {
     let changes = [

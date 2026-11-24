@@ -328,15 +328,19 @@ pub fn apply_appearance(_: &Window, _: Appearance) {}
 mod windows {
     use super::*;
     use crate::glass::{self, Kind};
-    use crate::glass_ui::{color, hover_edge, white};
+    use crate::glass_ui::white;
     use crate::{blocks, mark};
     use gpui::{div, prelude::*, px, FontWeight, Hsla, SharedString, Stateful, WindowControlArea};
 
-    const HEIGHT: f32 = 32.;
+    /// The margin around the caption buttons, the same on every side: under the pointer and when
+    /// pressed, a button is never flush with an edge of the bar. Above, it also keeps the
+    /// window's top resize edge outside the buttons' hit areas.
+    const INSET: f32 = 5.;
     const BUTTON_WIDTH: f32 = 30.;
     const BUTTON_HEIGHT: f32 = 26.;
     const RADIUS: f32 = 8.;
-    const RESIZE_INSET: f32 = 5.;
+    /// The bar: the margin, a button, the margin, and the rule under the bar.
+    pub const HEIGHT: f32 = INSET + BUTTON_HEIGHT + INSET + 1.;
 
     #[derive(Clone, Copy)]
     enum Control {
@@ -409,30 +413,11 @@ mod windows {
 
     fn control_button(control: Control, maximized: bool) -> Stateful<Div> {
         let id: SharedString = control.name().into();
-        let close = matches!(control, Control::Close);
         let rest = white(0.65);
-        let hover = if close { gpui::white() } else { white(1.) };
-        // The eased hover layer: the close button goes red, the others take the glass fill and edge.
-        let layer = if close {
-            crate::hover_fade(
-                &id,
-                || {
-                    div()
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .right_0()
-                        .bottom_0()
-                        .rounded(px(RADIUS))
-                },
-                |d, t| {
-                    d.bg(color(0xe5484d).opacity(0.85 * t))
-                        .border_1()
-                        .border_color(color(0xe5484d).opacity(t))
-                },
-            )
+        let hover = if matches!(control, Control::Close) {
+            gpui::white()
         } else {
-            hover_edge(&id, RADIUS, 0.10, false)
+            white(1.)
         };
         let el = div()
             .id(id.clone())
@@ -445,12 +430,13 @@ mod windows {
             .w(px(BUTTON_WIDTH))
             .h(px(BUTTON_HEIGHT))
             .rounded(px(RADIUS))
-            // Pressed: darker. Native hit tests may not report the press.
+            // Under the pointer nothing is drawn but the glyph brightening: no box, whose
+            // edges showed where the bar's margins ended. Pressed: darker (native hit tests may
+            // not report the press).
             .active(|s| s.bg(gpui::black().opacity(0.25)))
             // GPUI maps these to native non-client hit tests, retaining Snap Layouts,
             // Alt+Space and close handling. Click callbacks would run the action twice.
             .window_control_area(control.area())
-            .child(layer)
             .child(control_icon(control, maximized, rest, hover).relative());
         crate::track_hover(el, id)
     }
@@ -480,10 +466,12 @@ mod windows {
                 .flex_none()
                 .items_center()
                 .h(px(HEIGHT))
-                // Control hit tests run before native edge resizing in GPUI 0.2.2.
-                .when(!window.is_maximized(), |bar| {
-                    bar.pt(px(RESIZE_INSET)).px(px(RESIZE_INSET))
-                })
+                // Control hit tests run before native edge resizing in GPUI 0.2.2: the margin
+                // keeps the edges out of the buttons' reach. Maximized, there is no edge to
+                // resize: the buttons keep their margin on the right and sit in the middle of
+                // the height.
+                .when(!window.is_maximized(), |bar| bar.p(px(INSET)))
+                .when(window.is_maximized(), |bar| bar.pr(px(INSET)))
                 .when(theme.glass, |bar| {
                     bar.child(glass::backdrop(Kind::Glass, 0.))
                 })
@@ -497,8 +485,7 @@ mod windows {
                         .flex()
                         .flex_none()
                         .items_center()
-                        .gap(px(4.))
-                        .mr(px(6.))
+                        .gap(px(INSET))
                         .children(
                             [Control::Minimize, Control::Maximize, Control::Close]
                                 .map(|control| control_button(control, window.is_maximized())),
@@ -510,3 +497,9 @@ mod windows {
 
 #[cfg(target_os = "windows")]
 pub use windows::render;
+/// The title bar's height, for whatever is laid out below it.
+#[cfg(target_os = "windows")]
+pub use windows::HEIGHT;
+/// Where the system draws its own buttons: the bar's height on macOS and Linux.
+#[cfg(not(target_os = "windows"))]
+pub const HEIGHT: f32 = 32.;

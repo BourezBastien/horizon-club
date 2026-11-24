@@ -833,6 +833,44 @@ pub fn backups(tag: &str, dir: &Path) -> Result<Vec<Backup>, Problem> {
     serde_json::from_str(out.trim()).map_err(|e| Problem::plain(e.to_string()))
 }
 
+/// Where a server's backups are: its `backups` folder, one zip a backup.
+pub fn backups_folder(dir: &Path) -> PathBuf {
+    dir.join("backups")
+}
+
+/// Takes one of a server's backups away, to the system's trash as a world or a server goes: the
+/// world in play is not touched. `name` is a backup's file name as `backups` lists it, and
+/// nothing else: a name that could leave the backups folder is refused all the same. Err: why
+/// nothing was taken.
+pub fn delete_backup(dir: &Path, name: &str) -> Result<(), String> {
+    delete_backup_with(dir, name, crate::desktop_seams::to_trash)
+}
+
+/// [`delete_backup`], with the trash given.
+fn delete_backup_with(
+    dir: &Path,
+    name: &str,
+    trash: impl FnOnce(&Path) -> Result<(), String>,
+) -> Result<(), String> {
+    // `2026-10-19_11-28-57-auto.zip`: letters, digits, dots, dashes and underscores, a `.zip`
+    // at the end; no separator, so the name stays in the folder whatever it says.
+    let plain = name.strip_suffix(".zip").is_some_and(|stem| {
+        !stem.is_empty()
+            && !stem.starts_with('.')
+            && stem
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+    });
+    if !plain {
+        return Err(crate::i18n::tr("This is not a backup's name.").to_string());
+    }
+    let path = backups_folder(dir).join(name);
+    if !path.is_file() {
+        return Err(crate::i18n::tr("This backup is already gone.").to_string());
+    }
+    trash(&path)
+}
+
 /// The address friends on the same network type: this computer's LAN address. No packet is sent: the
 /// system only picks the interface it would use.
 pub fn lan_address() -> Option<std::net::IpAddr> {

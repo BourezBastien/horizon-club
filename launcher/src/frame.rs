@@ -21,18 +21,18 @@ pub const RAIL_OPEN: f32 = 248.;
 /// the left column and its tabs below it, so the sky drifts through the top right between them;
 /// every other page is text from the top bar down.
 pub fn keep_clear(w: f32, h: f32, home: bool) -> rain::Keep {
-    const TOP: f32 = 32. + MARGIN + theme::TOPBAR;
     const HERO: f32 = 400.;
     const HERO_WIDTH: f32 = 640.;
+    let top = titlebar::HEIGHT + MARGIN + theme::TOPBAR;
     let left = MARGIN + RAIL;
-    let body = if home { HERO } else { TOP };
+    let body = if home { HERO } else { top };
     rain::Keep([
-        [0., 0., w, TOP],
+        [0., 0., w, top],
         [0., 0., left, h],
-        [left, TOP, HERO_WIDTH.min(w - left), (HERO - TOP).max(0.)],
+        [left, top, HERO_WIDTH.min(w - left), (HERO - top).max(0.)],
         [left, body, w - left, (h - body).max(0.)],
         // The hero's right column: its version button.
-        [(w - 360.).max(left), TOP, 360., (HERO - TOP).max(0.)],
+        [(w - 360.).max(left), top, 360., (HERO - top).max(0.)],
     ])
 }
 

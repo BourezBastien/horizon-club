@@ -18,17 +18,20 @@ pub(super) fn backup_label(b: &Backup) -> (String, String) {
     };
     let (date, time) = when.split_once('_').unwrap_or((when, ""));
     let label = format!("{date} {} UTC", time.replace('-', ":"));
+    let before = |version: String| {
+        horizon_launcher::i18n::trf("Before updating to {version}", &[("version", &version)])
+    };
     let kind = match kind {
-        "auto" => "Automatic".to_string(),
-        "manual" => "Made by hand".to_string(),
-        "before-update" => "Before an update".to_string(),
+        "auto" => horizon_launcher::i18n::tr("Automatic").to_string(),
+        "manual" => horizon_launcher::i18n::tr("Made by hand").to_string(),
+        "before-update" => horizon_launcher::i18n::tr("Before an update").to_string(),
         // horizon-server writes the tag with dashes (before-v2026-10-19-10).
         k if k.starts_with("before-v")
             && k[8..].chars().all(|c| c.is_ascii_digit() || c == '-') =>
         {
-            format!("Before updating to {}", k[7..].replace('-', "."))
+            before(k[7..].replace('-', "."))
         }
-        k if k.starts_with("before-") => format!("Before updating to {}", &k[7..]),
+        k if k.starts_with("before-") => before(k[7..].to_string()),
         k => k.to_string(),
     };
     (label, kind)

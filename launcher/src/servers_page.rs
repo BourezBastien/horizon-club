@@ -295,6 +295,8 @@ pub(super) struct Servers {
     restart_needed: BTreeSet<String>,
     backups: Vec<Backup>,
     confirm_restore: Option<String>,
+    /// The backup whose deletion waits for a second click (its file name), as [`Self::confirm_restore`].
+    confirm_backup_delete: Option<String>,
     /// Whether the game's own log is shown under the server, as a problem's button asks.
     log_shown: bool,
     confirm_delete: bool,
@@ -364,6 +366,7 @@ impl Servers {
             restart_needed: BTreeSet::new(),
             backups: Vec::new(),
             confirm_restore: None,
+            confirm_backup_delete: None,
             log_shown: false,
             confirm_delete: false,
             pvp: None,
@@ -553,6 +556,7 @@ impl Launcher {
         s.confirm_restore = None;
         s.confirm_delete = false;
         s.log_shown = false;
+        s.confirm_backup_delete = None;
         s.texts.remove(&Field::DeleteServer);
         s.restart_needed.clear();
         s.texts.remove(&Field::Motd);
@@ -1388,10 +1392,19 @@ impl Launcher {
         line_edit::mouse(field, cx, move |this| this.servers.text(f))
     }
 
-    /// Escape closes the Create dialog. Whether it did.
+    /// Escape closes the Create dialog, or renounces a deletion or a restoration waiting for its
+    /// second click. Whether it did.
     pub(super) fn servers_escape(&mut self) -> bool {
         if self.page == Page::Servers && self.servers.confirm_delete {
             self.servers.confirm_delete = false;
+            return true;
+        }
+        if self.page == Page::Servers
+            && (self.servers.confirm_backup_delete.is_some()
+                || self.servers.confirm_restore.is_some())
+        {
+            self.servers.confirm_backup_delete = None;
+            self.servers.confirm_restore = None;
             return true;
         }
         if self.page != Page::Servers || self.servers.create.is_none() || self.servers.creating {
@@ -1832,7 +1845,7 @@ impl Launcher {
                         text(theme::CAPTION)
                             .text_color(t.muted)
                             .truncate()
-                            .child(format!("{label}… {last}")),
+                            .child(busy_line(label, &last)),
                     ),
             );
         }
@@ -1906,6 +1919,7 @@ impl Launcher {
                 let _ = this.update(cx, |this, cx| {
                     this.servers.tab = tab;
                     this.servers.confirm_restore = None;
+                    this.servers.confirm_backup_delete = None;
                     cx.notify();
                 });
             },
@@ -2927,6 +2941,18 @@ impl Launcher {
                 disabled(b)
             }
         };
+        let open = button("backups-folder", "Open folder", Kind::Secondary, &t).on_click(
+            cx.listener(|this, _: &ClickEvent, _, cx| {
+                // To see what the backups hold, in the computer's own window. The folder is made
+                // when no backup was ever taken, so the window opens on where they go.
+                if let Some(dir) = this.servers.open.clone() {
+                    let folder = servers::backups_folder(&dir);
+                    let _ = std::fs::create_dir_all(&folder);
+                    cx.open_with_system(&folder);
+                }
+                cx.notify();
+            }),
+        );
         let toggle = switch("auto-backup", auto, &t).on_click(cx.listener(
             move |this, _: &ClickEvent, _, cx| {
                 this.set_setting(
@@ -2944,11 +2970,17 @@ impl Launcher {
         for (i, b) in self.servers.backups.clone().into_iter().enumerate() {
             let (when, kind) = backup_label(&b);
             let confirming = self.servers.confirm_restore.as_deref() == Some(b.name.as_str());
+            // A deletion waits for a second click, as a restoration does.
+            let deleting = self.servers.confirm_backup_delete.as_deref() == Some(b.name.as_str());
             let name = b.name.clone();
-            let restored = format!(
+            // Each button's handler keeps its own copy of the name.
+            let to_delete = name.clone();
+            let restored = trf(
                 "The world is back as it was on {when}. The one it replaced is in the backups \
-                 folder."
+                 folder.",
+                &[("when", &when)],
             );
+            let gone = trf("The backup of {when} was deleted.", &[("when", &when)]);
             let restore = button(
                 SharedString::from(format!("restore-{i}")),
                 if confirming {
@@ -2967,6 +2999,7 @@ impl Launcher {
                 restore.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     if this.servers.confirm_restore.as_ref() == Some(&name) {
                         this.servers.confirm_restore = None;
+                        this.servers.confirm_backup_delete = None;
                         if let Some((dir, tag)) = this
                             .servers
                             .open
@@ -2981,11 +3014,43 @@ impl Launcher {
                         }
                     } else {
                         this.servers.confirm_restore = Some(name.clone());
+                        this.servers.confirm_backup_delete = None;
                     }
                     cx.notify();
                 }))
             } else {
                 disabled(restore)
+            };
+            let delete = button(
+                SharedString::from(format!("backup-delete-{i}")),
+                if deleting { "Delete it" } else { "Delete" },
+                if deleting {
+                    Kind::Secondary
+                } else {
+                    Kind::Ghost
+                },
+                &t,
+            );
+            let delete = if idle {
+                delete.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    if this.servers.confirm_backup_delete.as_ref() == Some(&to_delete) {
+                        this.servers.confirm_backup_delete = None;
+                        if let Some(dir) = this.servers.open.clone() {
+                            let (to_delete, gone) = (to_delete.clone(), gone.clone());
+                            this.server_job("Deleting the backup", move |_| {
+                                servers::delete_backup(&dir, &to_delete)
+                                    .map(|_| gone)
+                                    .map_err(Problem::plain)
+                            });
+                        }
+                    } else {
+                        this.servers.confirm_backup_delete = Some(to_delete.clone());
+                        this.servers.confirm_restore = None;
+                    }
+                    cx.notify();
+                }))
+            } else {
+                disabled(delete)
             };
             let mut right = div().flex().items_center().gap(px(8.));
             if confirming {
@@ -2993,12 +3058,29 @@ impl Launcher {
                     button("restore-cancel", "Cancel", Kind::Ghost, &t).on_click(cx.listener(
                         |this, _: &ClickEvent, _, cx| {
                             this.servers.confirm_restore = None;
+                            this.servers.confirm_backup_delete = None;
                             cx.notify();
                         },
                     )),
                 );
             }
             right = right.child(restore);
+            if deleting {
+                right = right.child(
+                    button("backup-delete-cancel", "Cancel", Kind::Ghost, &t).on_click(
+                        cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.servers.confirm_backup_delete = None;
+                            cx.notify();
+                        }),
+                    ),
+                );
+            }
+            // The second click is the one that deletes: it is said in red.
+            right = right.child(if deleting {
+                delete.text_color(t.danger)
+            } else {
+                delete
+            });
             let detail = if kind.is_empty() {
                 bytes(b.bytes)
             } else {
@@ -3012,15 +3094,31 @@ impl Launcher {
             ));
         }
         let mut tab = div().flex().flex_col().gap(px(20.)).child(
-            div().flex().items_center().gap(px(16.)).child(now).child(
-                text(theme::CAPTION)
-                    .text_color(t.muted)
-                    .child(if status.running() {
-                        tr("Players stay online: the world is saved, then zipped.")
-                    } else {
-                        tr("Zips the world and the server's settings into its backups folder.")
-                    }),
-            ),
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(px(16.))
+                .child(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(now)
+                        .child(open),
+                )
+                .child(
+                    text(theme::CAPTION)
+                        .text_color(t.muted)
+                        .flex_1()
+                        .min_w(px(0.))
+                        .child(if status.running() {
+                            tr("Players stay online: the world is saved, then zipped.")
+                        } else {
+                            tr("Zips the world and the server's settings into its backups folder.")
+                        }),
+                ),
         );
         tab = tab.child(self.toggle_row(
             "Back up automatically",
@@ -3041,6 +3139,16 @@ impl Launcher {
                     "Restoring replaces the world with this backup. The world as it is now isn't \
                  deleted: it's moved into the backups folder. A running server stops and starts \
                  again with the restored world.",
+                )
+                .into(),
+                &t,
+            ));
+        }
+        if self.servers.confirm_backup_delete.is_some() {
+            tab = tab.child(notice(
+                tr(
+                    "Deleting a backup doesn't touch the world in play. The backup goes to the \
+                     computer's trash.",
                 )
                 .into(),
                 &t,
@@ -3422,6 +3530,25 @@ impl Launcher {
         }
         grid
     }
+}
+
+/// What the page says while a server's operation runs: its label in the launcher's language,
+/// then what the operation last printed.
+fn busy_line(label: &str, last: &str) -> String {
+    let label = match label {
+        "Starting" => tr("Starting…"),
+        "Stopping" => tr("Stopping…"),
+        "Restarting" => tr("Restarting…"),
+        "Changing operators" => tr("Changing operators…"),
+        "Updating the list" => tr("Updating the list…"),
+        "Letting someone in" => tr("Letting someone in…"),
+        "Backing up" => tr("Backing up…"),
+        "Restoring" => tr("Restoring…"),
+        "Deleting the backup" => tr("Deleting the backup…"),
+        // A label already in the launcher's language, as one that names a player.
+        other => return format!("{other}… {last}"),
+    };
+    format!("{label} {last}")
 }
 
 /// The state, in a few words.

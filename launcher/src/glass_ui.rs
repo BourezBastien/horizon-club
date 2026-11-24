@@ -20,6 +20,9 @@ thread_local! {
     static LOOK: Cell<Glass> = Cell::new(Glass::default_look());
     /// Whether the rows being built go in a Settings card ([`flat_rows`]).
     static FLAT: Cell<bool> = const { Cell::new(false) };
+    /// What a hover draws when the blocky look's pages are the ones drawn ([`set_hover_tint`]):
+    /// its own light tint, where the glass look draws a fill and an outline.
+    static HOVER_TINT: Cell<Option<Hsla>> = const { Cell::new(None) };
     /// The light appearance: the glass look's white ink and fills turn to [`INK`].
     static LIGHT: Cell<bool> = const { Cell::new(false) };
     /// The player's flourishes ([`effects`]).
@@ -93,6 +96,47 @@ pub fn flat_rows<R>(f: impl FnOnce() -> R) -> R {
 /// Whether rows are being built for a Settings card.
 pub fn flat() -> bool {
     FLAT.get()
+}
+
+/// Set as each frame's pages start being built: the blocky look's hover, a light tint of its own,
+/// or None when the glass look's pages are drawn and a hover is their fill and outline.
+pub fn set_hover_tint(tint: Option<Hsla>) {
+    HOVER_TINT.set(tint);
+}
+
+/// How a hover is drawn, by the look ([`set_hover_tint`]): the blocky look's tint, square and with
+/// no outline; else white at `fill` under the hover outline, round at `r`.
+#[derive(Clone, Copy)]
+enum Hover {
+    Tint(Hsla),
+    Glass { r: f32, fill: f32 },
+}
+
+impl Hover {
+    fn new(r: f32, fill: f32) -> Self {
+        match HOVER_TINT.get() {
+            Some(tint) => Hover::Tint(tint),
+            None => Hover::Glass { r, fill },
+        }
+    }
+
+    fn radius(&self) -> f32 {
+        match self {
+            Hover::Tint(_) => crate::theme::RADIUS,
+            Hover::Glass { r, .. } => *r,
+        }
+    }
+
+    /// The layer at `t`: 0 (rest) to 1 (hovered).
+    fn paint(&self, d: Div, t: f32) -> Div {
+        match *self {
+            Hover::Tint(tint) => d.bg(tint.opacity(t)),
+            Hover::Glass { fill, .. } => d
+                .bg(white(fill * t))
+                .border_1()
+                .border_color(white(edge::HOVER * t)),
+        }
+    }
 }
 
 /// A Settings row (`SettingRow`): the name in 15 px semibold, its note in 13 px on 1.5 at 60 %,
@@ -297,9 +341,12 @@ pub mod edge {
 }
 
 /// `id`'s hover layer: a white fill at `fill` and an outline at [`edge::HOVER`], both eased in
-/// and out. `bordered`: the element has its own 1 px outline, which the layer's covers.
+/// and out; in the blocky look, its tint instead ([`set_hover_tint`]). `bordered`: the element
+/// has its own 1 px outline, which the layer's covers.
 pub(crate) fn hover_edge(id: &SharedString, r: f32, fill: f32, bordered: bool) -> gpui::AnyElement {
     let inset = if bordered { -1. } else { 0. };
+    let hover = Hover::new(r, fill);
+    let radius = hover.radius();
     hover_fade(
         id,
         move || {
@@ -309,13 +356,9 @@ pub(crate) fn hover_edge(id: &SharedString, r: f32, fill: f32, bordered: bool) -
                 .left(px(inset))
                 .right(px(inset))
                 .bottom(px(inset))
-                .rounded(px(r))
+                .rounded(px(radius))
         },
-        move |d, t| {
-            d.bg(white(fill * t))
-                .border_1()
-                .border_color(white(edge::HOVER * t))
-        },
+        move |d, t| hover.paint(d, t),
     )
 }
 
@@ -328,8 +371,7 @@ fn hover_back(inset: f32, r: f32, paint: impl Fn(Div, f32) -> Div + 'static) -> 
     let n = BACKS.get();
     BACKS.set(n + 1);
     // Named by its place in the frame's build: the pages are built in the same order each frame.
-    // shortcut: a row hovered as its page is swapped by the keyboard may stay lit until the
-    // pointer moves over it; give the callers ids if that shows.
+    // So a number is another's from one page to the next; the check below ends what that leaves.
     let id = SharedString::from(format!("hover-back-{n}"));
     let state = BACK_HOVER.with_borrow(|all| all.get(&id).copied());
     let shown = back_phase(state, horizon_theme::QUICK.duration()).map(|(on, at)| {
@@ -353,6 +395,7 @@ fn hover_back(inset: f32, r: f32, paint: impl Fn(Div, f32) -> Div + 'static) -> 
             )
     });
     let key = id.clone();
+    let lit = key.clone();
     div()
         .id(id)
         .absolute()
@@ -365,6 +408,34 @@ fn hover_back(inset: f32, r: f32, paint: impl Fn(Div, f32) -> Div + 'static) -> 
             });
             window.refresh();
         })
+        // The control that opened a page was lit, and on the new page its number is a row's: the
+        // row would stay lit until the pointer crossed it. A lit layer the pointer is not over
+        // went out already.
+        .child(
+            canvas(
+                move |bounds, window, _| {
+                    let elsewhere = BACK_HOVER.with_borrow(|all| {
+                        all.get(&lit).is_some_and(|&(on, _)| {
+                            on && !bounds.contains(&window.mouse_position())
+                        })
+                    });
+                    if elsewhere {
+                        BACK_HOVER.with_borrow_mut(|all| {
+                            all.insert(
+                                lit.clone(),
+                                (
+                                    false,
+                                    std::time::Instant::now() - 2 * horizon_theme::QUICK.duration(),
+                                ),
+                            );
+                        });
+                        window.refresh();
+                    }
+                },
+                |_, _, _, _| {},
+            )
+            .size_full(),
+        )
         .children(shown)
         .into_any_element()
 }
@@ -378,14 +449,15 @@ fn back_phase(
     state.filter(|&(on, at)| on || at.elapsed() < len)
 }
 
-/// [`hover_back`] as [`hover_edge`]: white at `fill` and the hover outline. `bordered`: the
-/// element has its own 1 px outline, which the layer's covers.
+/// [`hover_back`] as [`hover_edge`]: white at `fill` and the hover outline, or the blocky look's
+/// tint. `bordered`: the element has its own 1 px outline, which the layer's covers.
 pub fn back_edge(r: f32, fill: f32, bordered: bool) -> AnyElement {
-    hover_back(if bordered { -1. } else { 0. }, r, move |d, t| {
-        d.bg(white(fill * t))
-            .border_1()
-            .border_color(white(edge::HOVER * t))
-    })
+    let hover = Hover::new(r, fill);
+    hover_back(
+        if bordered { -1. } else { 0. },
+        hover.radius(),
+        move |d, t| hover.paint(d, t),
+    )
 }
 
 /// [`hover_back`] in one colour (white at a few %, a dark tint, the danger red), no outline.

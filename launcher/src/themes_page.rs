@@ -576,11 +576,13 @@ impl Launcher {
     }
 
     /// The Performance mode row: the cheaper scene for older computers (a quarter-resolution
-    /// sky, a box blur, resizes baked in the background, no frame per mouse move).
+    /// sky, a box blur, resizes baked in the background, no frame per mouse move). It is a row of
+    /// the page like its neighbours, in each look.
     pub(super) fn performance_row(&mut self, cx: &mut Context<Self>) -> Div {
         let t = self.theme;
         let on = self.settings.performance();
-        ui::setting_row(
+        index_row(
+            0,
             tr("Performance mode"),
             Some(
                 div()
@@ -600,6 +602,7 @@ impl Launcher {
                     }))
                     .into_any_element(),
             ),
+            &t,
         )
     }
 

@@ -312,9 +312,7 @@ impl Launcher {
                     .flex_col()
                     .gap(px(8.))
                     .child(progress_bar(None, &t))
-                    .child(
-                        ui::card_note(format!("{} {last}", tr(&format!("{label}…")))).truncate(),
-                    ),
+                    .child(ui::card_note(busy_line(&label, &last)).truncate()),
             );
         }
         if let Some(p) = self.servers.problem.clone() {

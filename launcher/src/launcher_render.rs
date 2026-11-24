@@ -25,6 +25,17 @@ impl Render for Launcher {
         }
         glass_ui::set_on(self.theme.glass);
         glass_ui::set_light(!self.theme.dark);
+        // In the blocky look, what the glass pages draw on hover is the look's own tint.
+        let hover_tint = if self.theme.glass {
+            None
+        } else {
+            let n = self.theme.night;
+            Some(gpui::Hsla::from(crate::plate::alpha(
+                n.card_hi,
+                n.card_hi_alpha * 0.5,
+            )))
+        };
+        glass_ui::set_hover_tint(hover_tint);
         glass::set_light(!self.theme.dark);
         self.look = self.theme.look;
         glass_ui::set_look(self.look);
