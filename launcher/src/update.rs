@@ -185,6 +185,17 @@ fn release_of(json: &str) -> Result<Release, String> {
     })
 }
 
+/// What a line of [`setup`] says about a file of the release: on its way, checked, in place.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Step {
+    /// From beside the installer, or from GitHub.
+    Taking,
+    /// A download, against the release's list of hashes.
+    Checked,
+    /// Written where the students' PCs find it.
+    Placed,
+}
+
 /// Installs a release into `root` from the start: the launcher in `app\<version>\` with
 /// `app\current.txt` naming it, the bootstrap at the root, and the supervisor's tool in
 /// `admin\`, each checked against the release's list of hashes. The files in `beside` (a folder
@@ -195,7 +206,7 @@ pub fn setup(
     root: &Path,
     release: &Release,
     beside: &Path,
-    said: &mut dyn FnMut(String),
+    said: &mut dyn FnMut(Step, String),
 ) -> Result<Installed, String> {
     let engine = downloader()?;
     let cancel = AtomicBool::new(false);
@@ -211,19 +222,22 @@ pub fn setup(
             .filter(|bytes| verify_named(bytes, &sums, name).is_ok());
         let bytes = match mine {
             Some(bytes) => {
-                said(crate::i18n::trf(
-                    "{name}: the file beside the installer.",
-                    &[("name", name)],
-                ));
+                said(
+                    Step::Taking,
+                    crate::i18n::trf("{name}: the file beside the installer.", &[("name", name)]),
+                );
                 bytes
             }
             None => {
-                said(crate::i18n::trf("{name}: downloading…", &[("name", name)]));
+                said(
+                    Step::Taking,
+                    crate::i18n::trf("{name}: downloading…", &[("name", name)]),
+                );
                 let bytes = fetch(release, name, &sums)?;
-                said(crate::i18n::trf(
-                    "{name}: checked by its hash.",
-                    &[("name", name)],
-                ));
+                said(
+                    Step::Checked,
+                    crate::i18n::trf("{name}: checked by its hash.", &[("name", name)]),
+                );
                 bytes
             }
         };
@@ -233,17 +247,23 @@ pub fn setup(
             Place::Launcher => folder_of(root, &release.version)?.join(LAUNCHER),
         };
         put(&target, &bytes)?;
-        said(crate::i18n::trf(
-            "Installed {file}.",
-            &[("file", &target.display().to_string())],
-        ));
+        said(
+            Step::Placed,
+            crate::i18n::trf(
+                "Installed {file}.",
+                &[("file", &target.display().to_string())],
+            ),
+        );
         files.push(target);
     }
     point_at(root, &release.version)?;
-    said(crate::i18n::trf(
-        "app\\current.txt now says {version}.",
-        &[("version", &release.version)],
-    ));
+    said(
+        Step::Placed,
+        crate::i18n::trf(
+            "app\\current.txt now says {version}.",
+            &[("version", &release.version)],
+        ),
+    );
     Ok(Installed { files })
 }
 

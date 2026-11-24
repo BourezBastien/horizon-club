@@ -276,8 +276,8 @@ fn a_share_is_installed_from_the_files_beside_the_installer_then_from_the_releas
         admin: Some(format!("{base}/club-admin.exe")),
     };
     let mut heard = Vec::new();
-    let installed = setup(root.path(), &release, beside.path(), &mut |line| {
-        heard.push(line)
+    let installed = setup(root.path(), &release, beside.path(), &mut |step, line| {
+        heard.push((step, line))
     })
     .unwrap();
     server.join().unwrap();
@@ -326,6 +326,6 @@ fn a_share_is_installed_from_the_files_beside_the_installer_then_from_the_releas
         admin: Some(nowhere),
         ..release
     };
-    let again = setup(root.path(), &offline, beside.path(), &mut |_| ()).unwrap();
+    let again = setup(root.path(), &offline, beside.path(), &mut |_, _| ()).unwrap();
     assert_eq!(again, installed);
 }

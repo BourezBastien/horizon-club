@@ -9,7 +9,11 @@
 //! `admin\` folder, else the search the launcher makes (`club::root`). Whatever it is, it is
 //! given to the library as `HORIZON_CLUB_ROOT` before anything else reads a folder, so every
 //! path the tool writes is the one the students' launchers see. Its messages go through the
-//! launcher's own `tr`/`trf`, so they are in the club's language.
+//! launcher's own `tr`/`trf`, so they are in the club's language. It says them in colours
+//! (`club_admin/out.rs`): what is done, what is detail, what is to read, what went wrong.
+#[macro_use]
+#[path = "club_admin/out.rs"]
+mod out;
 #[path = "club_admin/edits.rs"]
 mod edits;
 #[path = "club_admin/installer.rs"]
@@ -23,6 +27,7 @@ use clap::{Parser, Subcommand};
 use horizon_launcher::backend;
 use horizon_launcher::i18n::{self, tr, trf};
 use horizon_launcher::{club, config, downloads, mojang, sources, update};
+use out::{Banner, Level};
 use report::Finding;
 use std::fs;
 use std::net::ToSocketAddrs;
@@ -126,6 +131,8 @@ enum ServerCommand {
 }
 
 fn main() {
+    // The window's colours, before anything is said in it.
+    out::start();
     // `HorizonClubSetup.exe` is this program under the installer's name: opened with nothing on
     // its command line, it installs.
     let setup = std::env::current_exe()
@@ -145,7 +152,7 @@ fn main() {
     let root = match resolve_root(cli.root.as_deref()) {
         Ok(root) => root,
         Err(error) => {
-            eprintln!("{error}");
+            say!(Level::Error, "{error}");
             std::process::exit(2);
         }
     };
@@ -163,7 +170,7 @@ fn main() {
     let code = match run(&cli.command, &root, config.as_ref()) {
         Ok(code) => code,
         Err(error) => {
-            eprintln!("{error}");
+            say!(Level::Error, "{error}");
             1
         }
     };
@@ -213,7 +220,8 @@ fn run(
             let text = managed::text(config, &resolve_names);
             let path = club::managed_file();
             write_atomic(&path, &text)?;
-            println!(
+            say!(
+                Level::Done,
                 "{}",
                 trf(
                     "Wrote {path} ({lines} lines).",
@@ -239,7 +247,8 @@ fn run(
             let text = read_club_toml(&path)?;
             let edited = edits::set_active(&text, tag)?;
             write_atomic(&path, &edited)?;
-            println!(
+            say!(
+                Level::Done,
                 "{}",
                 trf(
                     "The club now plays {tag} ([versions] active in club.toml).",
@@ -254,7 +263,8 @@ fn run(
             let edited = match command {
                 ServerCommand::Add { name, address } => {
                     let edited = edits::add_server(&text, name, address)?;
-                    println!(
+                    say!(
+                        Level::Done,
                         "{}",
                         trf(
                             "Added {name} ({address}) to club.toml's servers.",
@@ -265,7 +275,8 @@ fn run(
                 }
                 ServerCommand::Remove { name } => {
                     let edited = edits::remove_server(&text, name)?;
-                    println!(
+                    say!(
+                        Level::Done,
                         "{}",
                         trf("Took {name} off club.toml's servers.", &[("name", name)])
                     );
@@ -273,7 +284,8 @@ fn run(
                 }
             };
             write_atomic(&path, &edited)?;
-            println!(
+            say!(
+                Level::Warn,
                 "{}",
                 tr("Run sync so managed.txt says what the new list says.")
             );
@@ -305,7 +317,8 @@ fn run(
                     ],
                 )
             })?;
-            println!(
+            say!(
+                Level::Done,
                 "{}",
                 trf(
                     "Published the launcher as app\\{version}\\HorizonClubLauncher.exe.",
@@ -316,7 +329,8 @@ fn run(
                 &root.join("app").join("current.txt"),
                 &format!("{version}\n"),
             )?;
-            println!(
+            say!(
+                Level::Detail,
                 "{}",
                 trf(
                     "app\\current.txt now says {version}.",
@@ -336,7 +350,11 @@ fn run(
                         ],
                     )
                 })?;
-                println!("{}", tr("Copied the bootstrap to the club's root."));
+                say!(
+                    Level::Done,
+                    "{}",
+                    tr("Copied the bootstrap to the club's root.")
+                );
             }
             Ok(0)
         }
@@ -428,7 +446,8 @@ pub(crate) fn install_build(
             ],
         )
     })?;
-    println!(
+    say!(
+        Level::Done,
         "{}",
         trf(
             "Installed {from} as core\\{tag}.",
@@ -453,15 +472,17 @@ fn update_the_share(root: &Path, check_only: bool) -> Result<i32, String> {
         .map(|text| text.trim().to_string())
         .unwrap_or_default();
     let Some(release) = update::check(&current)? else {
-        println!(
-            "{}",
-            tr("The share already has the club's newest launcher.")
+        out::blank();
+        out::banner(
+            Banner::Good,
+            &[tr("The share already has the club's newest launcher.").to_string()],
         );
         return Ok(0);
     };
     let version = [("version", release.version.as_str())];
     if check_only {
-        println!(
+        say!(
+            Level::Warn,
             "{}",
             trf(
                 "Version {version} of the launcher is available: run club-admin update to install it on the share.",
@@ -470,14 +491,20 @@ fn update_the_share(root: &Path, check_only: bool) -> Result<i32, String> {
         );
         return Ok(0);
     }
-    println!("{}", trf("Downloading version {version}…", &version));
-    update::install(root, &release)?;
-    println!(
+    say!(
+        Level::Step,
         "{}",
-        trf(
+        trf("Downloading version {version}…", &version)
+    );
+    update::install(root, &release)?;
+    out::blank();
+    out::banner(
+        Banner::Good,
+        &[trf(
             "The share now has version {version}: every PC uses it the next time it starts.",
-            &version
+            &version,
         )
+        .to_string()],
     );
     Ok(0)
 }
@@ -487,7 +514,8 @@ fn update_the_share(root: &Path, check_only: bool) -> Result<i32, String> {
 /// The report of the share: facts read from the disk, then their verdicts. The exit code is 1
 /// when something keeps a student from playing.
 fn check(root: &Path, config: Result<&config::Config, &config::Error>) -> Result<i32, String> {
-    println!(
+    say!(
+        Level::Title,
         "{}",
         trf(
             "The club's folder: {root}",
@@ -574,16 +602,23 @@ impl report::Facts {
 fn print_verdicts(facts: &report::Facts) -> Result<i32, String> {
     let finds = report::verdicts(facts);
     for Finding { blocks, said } in &finds {
-        println!("{} {said}", if *blocks { "✗" } else { "✓" });
+        out::line(if *blocks { Level::Error } else { Level::Done }, said);
     }
+    out::blank();
     if report::any_blocks(&finds) {
-        println!(
-            "{}",
-            tr("Something keeps a student from playing: the lines above with ✗ say what to run.")
+        out::banner(
+            Banner::Bad,
+            &[tr(
+                "Something keeps a student from playing: the lines above with ✗ say what to run.",
+            )
+            .to_string()],
         );
         Ok(1)
     } else {
-        println!("{}", tr("The share is ready: a student can play."));
+        out::banner(
+            Banner::Good,
+            &[tr("The share is ready: a student can play.").to_string()],
+        );
         Ok(0)
     }
 }
@@ -622,7 +657,8 @@ fn data_file(tag: &str) -> Result<(), String> {
     let file = resources.join(DATA_FILE);
     if file.is_file() {
         if data_file_usable(&resources) {
-            println!(
+            say!(
+                Level::Detail,
                 "{}",
                 trf(
                     "{file} is already there.",
@@ -633,7 +669,8 @@ fn data_file(tag: &str) -> Result<(), String> {
         }
         // Written for another folder, as when the build was copied from elsewhere: the game
         // would leave it alone and read its files one by one.
-        println!(
+        say!(
+            Level::Warn,
             "{}",
             trf(
                 "{file} was written for another folder: it is written again for this one.",
@@ -653,7 +690,8 @@ fn data_file(tag: &str) -> Result<(), String> {
     let readers = std::thread::available_parallelism().map_or(1, |n| n.get().min(8));
     horizon_platform::prepared_files::write_with_readers(&resources, readers)
         .map_err(|e| format!("{}: {e}", file.display()))?;
-    println!(
+    say!(
+        Level::Done,
         "{}",
         trf(
             "Wrote {file} ({readers} files read at a time).",
@@ -673,7 +711,8 @@ fn prepare(
     server_jar: Option<&Path>,
     java_home: Option<&Path>,
 ) -> Result<(), String> {
-    let log = |line: String| println!("{line}");
+    // The preparer's lines are detail: read them when preparing fails.
+    let log = |line: String| out::line(out::Level::Detail, &line);
     // Java 25: found by the preparer, or named here.
     if let Some(home) = java_home {
         std::env::set_var("JAVA_HOME", home);
@@ -684,7 +723,8 @@ fn prepare(
                 std::env::set_var("PATH", joined);
             }
         }
-        println!(
+        say!(
+            Level::Info,
             "{}",
             trf(
                 "Using the Java of {home}.",
@@ -710,7 +750,8 @@ fn prepare(
                 ],
             )
         })?;
-        println!(
+        say!(
+            Level::Info,
             "{}",
             trf(
                 "Using the server jar {to}.",
@@ -737,7 +778,8 @@ fn prepare(
                 sources::Os::MacOs => "osx",
                 sources::Os::Windows => "windows",
             };
-            println!(
+            say!(
+                Level::Step,
                 "{}",
                 trf(
                     "Downloading Minecraft {version} from Mojang into {dir}…",
@@ -829,7 +871,8 @@ fn copy_folder_without(from: &Path, to: &Path, without: &str) -> Result<(), Stri
 fn warn_mapped_drive() {
     #[cfg(windows)]
     if mapped_drive_letter(&club::root()) {
-        println!(
+        say!(
+            Level::Warn,
             "{}",
             tr(
                 "Warning: the club's folder was given as a mapped drive. horizon-data.bin \

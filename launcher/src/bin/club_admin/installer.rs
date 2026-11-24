@@ -20,7 +20,12 @@ pub(super) fn run(given: Option<&Path>, game: Option<PathBuf>, yes: bool) -> i32
     match install(given, game, yes) {
         Ok(code) => code,
         Err(error) => {
-            eprintln!("{error}");
+            say!(out::Level::Error, "{error}");
+            out::blank();
+            out::banner(
+                out::Banner::Bad,
+                &[tr("The install could not finish.").to_string()],
+            );
             if !yes {
                 wait_for_enter();
             }
@@ -30,7 +35,7 @@ pub(super) fn run(given: Option<&Path>, game: Option<PathBuf>, yes: bool) -> i32
 }
 
 fn wait_for_enter() {
-    println!("{}", tr("Press Enter to close."));
+    say!(out::Level::Detail, "{}", tr("Press Enter to close."));
     let mut line = String::new();
     let _ = std::io::stdin().read_line(&mut line);
 }
@@ -42,7 +47,8 @@ fn install(given: Option<&Path>, game: Option<PathBuf>, yes: bool) -> Result<i32
         .unwrap_or_default();
     // The folder the program is in is the folder it installs into.
     let folder = folder_of(given, &beside);
-    println!(
+    say!(
+        Level::Title,
         "{}",
         trf(
             "Horizon Club is installed into {folder}.",
@@ -84,8 +90,53 @@ enum Game {
     There,
     /// In `core\`, but its game files are not prepared.
     ToPrepare,
+    /// In `core\` and prepared, but its data file would not be written: the game reads its files
+    /// one by one, and starts in minutes.
+    Unwritten,
     /// Not put in place.
     Later,
+}
+
+impl Game {
+    /// The band that ends the install: how it went, and its first line.
+    fn band(&self, version: &str) -> (out::Banner, String) {
+        let version = [("version", version)];
+        match self {
+            Game::There => (
+                out::Banner::Good,
+                trf(
+                    "Horizon Club {version} is installed, with no error.",
+                    &version,
+                )
+                .to_string(),
+            ),
+            Game::Later => (
+                out::Banner::Attention,
+                trf(
+                    "Horizon Club {version} is installed, but the game is missing.",
+                    &version,
+                )
+                .to_string(),
+            ),
+            Game::ToPrepare => (
+                out::Banner::Attention,
+                trf(
+                    "Horizon Club {version} is installed, but its game files are not prepared.",
+                    &version,
+                )
+                .to_string(),
+            ),
+            Game::Unwritten => (
+                out::Banner::Attention,
+                trf(
+                    "Horizon Club {version} is installed, but its data file could not be \
+                     written: the game will take minutes to start.",
+                    &version,
+                )
+                .to_string(),
+            ),
+        }
+    }
 }
 
 /// Where the game to put in place was found ([`find_game`]).
@@ -111,8 +162,16 @@ fn install_into(
     // Everything the library writes now goes to that folder, spelled as it was given.
     std::env::set_var("HORIZON_CLUB_ROOT", folder);
     let release = newest_release(beside)?;
-    let mut said = |line: String| println!("  {line}");
-    let installed = update::setup(folder, &release, beside, &mut said)?;
+    let installed = update::setup(folder, &release, beside, &mut |step, line: String| {
+        // On its way: an arrow. Checked, in place: a tick.
+        out::line(
+            match step {
+                update::Step::Taking => Level::Step,
+                update::Step::Checked | update::Step::Placed => Level::Done,
+            },
+            &line,
+        )
+    })?;
     for part in ["core", "online/people"] {
         fs::create_dir_all(folder.join(part))
             .map_err(|e| format!("{}: {e}", folder.join(part).display()))?;
@@ -120,7 +179,8 @@ fn install_into(
     let file = folder.join(config::FILE);
     if !file.exists() {
         write_atomic(&file, MODEL)?;
-        println!(
+        say!(
+            Level::Warn,
             "{}",
             trf(
                 "Wrote {file}: read it, and put the club's name and its server's address there.",
@@ -132,11 +192,13 @@ fn install_into(
     let text = managed::text(&config, &resolve_names);
     let rule = club::managed_file();
     write_atomic(&rule, &text)?;
-    println!(
+    say!(
+        Level::Detail,
         "{}",
         trf("Wrote {file}.", &[("file", &rule.display().to_string())])
     );
-    println!(
+    say!(
+        Level::Info,
         "{}",
         trf(
             "Installed Horizon Club {version} in {folder}.",
@@ -155,36 +217,41 @@ fn install_into(
         .find(|file| file.ends_with(update::BOOTSTRAP))
         .cloned()
         .unwrap_or_else(|| folder.join(update::BOOTSTRAP));
-    println!();
-    println!(
-        "{}",
-        trf(
-            "It is installed. On each PC, make a shortcut to {file}.",
-            &[("file", &bootstrap.display().to_string())],
-        )
-    );
-    if game == Game::Later {
-        println!(
-            "{}",
+    // The last word: a band across the window, green when all is in place.
+    let (how, head) = game.band(&release.version);
+    let mut band = vec![head];
+    let shown = folder.display().to_string();
+    let here = [("folder", shown.as_str())];
+    match game {
+        Game::There | Game::Unwritten => (),
+        Game::Later => band.push(
             trf(
                 "No game was found on this computer: copy the `core` folder of a folder that has \
                  the game next to this program (into {folder}), then open this program again.",
-                &[("folder", &folder.display().to_string())],
+                &here
             )
-        );
-    }
-    if game == Game::ToPrepare {
-        println!(
-            "{}",
+            .to_string(),
+        ),
+        Game::ToPrepare => band.push(
             tr("Prepare the game's files, once, from a computer where Minecraft 26.3 is installed: club-admin prepare.")
-        );
+                .to_string(),
+        ),
     }
-    println!("{}", tr("What is left to do:"));
+    band.push(
+        trf(
+            "On each PC, make a shortcut to {file}.",
+            &[("file", &bootstrap.display().to_string())],
+        )
+        .to_string(),
+    );
+    out::blank();
+    out::banner(how, &band);
+    say!(out::Level::Title, "{}", tr("What is left to do:"));
     for step in [
         tr("Correct club.toml (the club's name, its server's address), then: club-admin sync"),
         tr("On the file server, tools/school/setup-share.ps1: students read everything and write in online\\ alone."),
     ] {
-        println!("  • {step}");
+        say!(out::Level::Info, "  • {}", step);
     }
     if !yes {
         wait_for_enter();
@@ -253,7 +320,8 @@ fn find_game(folder: &Path, named: Option<&Path>, known: &[PathBuf]) -> Found {
 fn put_game(found: &Found) -> Game {
     let tag = match found {
         Found::There(tag) => {
-            println!(
+            say!(
+                Level::Done,
                 "{}",
                 trf(
                     "core\\{tag} is already there: the game is kept.",
@@ -263,7 +331,8 @@ fn put_game(found: &Found) -> Game {
             tag.clone()
         }
         Found::From { from, tag } => {
-            println!(
+            say!(
+                Level::Step,
                 "{}",
                 trf(
                     "Copying the game from {folder}… It takes a few minutes.",
@@ -272,11 +341,15 @@ fn put_game(found: &Found) -> Game {
             );
             match install_build(&club::versions_dir(), from, Some(tag.clone())) {
                 Ok(tag) => {
-                    println!("{}", trf("The game is in core\\{tag}.", &[("tag", &tag)]));
+                    say!(
+                        Level::Info,
+                        "{}",
+                        trf("The game is in core\\{tag}.", &[("tag", &tag)])
+                    );
                     tag
                 }
                 Err(why) => {
-                    println!("{why}");
+                    say!(out::Level::Error, "{why}");
                     return Game::Later;
                 }
             }
@@ -286,8 +359,15 @@ fn put_game(found: &Found) -> Game {
     match data_file(&tag) {
         Ok(()) => Game::There,
         Err(why) => {
-            println!("{why}");
-            Game::ToPrepare
+            // Not prepared is said and has its way (`prepare`); prepared, with a file that would
+            // not be written, is an error.
+            let prepared = backend::check_prepared(&tag);
+            say!(if prepared { Level::Error } else { Level::Warn }, "{why}");
+            if prepared {
+                Game::Unwritten
+            } else {
+                Game::ToPrepare
+            }
         }
     }
 }
